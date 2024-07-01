@@ -9,52 +9,117 @@ use bmp::{
 const FRAME: &str = "./assets/bad_apple_no_lags_000/bad_apple_no_lags_170.bmp";
 const COLOR_TO_TRIANGULATE: Pixel = WHITE;
 
+pub const MIN_PATH_SIZE: usize = 12;
+
 fn main() {
     let img = bmp::open(FRAME).unwrap_or_else(|e| {
         panic!("Failed to open: {}", e);
     });
 
-    let (w, h) = (img.get_width(), img.get_height());
-    println!("Loaded bmp, size {} {}", w, h);
-
-    let vertices = detect_edges_as_vertices(&img, COLOR_TO_TRIANGULATE);
-
-    // DEBUG OUTPUT
-    let edges_bmp = create_edges_bitmap(&vertices);
+    let pixels_edges = detect_edges(&img, COLOR_TO_TRIANGULATE);
+    let output_frame_size = pixels_edges.size;
+    // Debug output
+    let edges_bmp = create_edges_bitmap(&pixels_edges);
     let _ = edges_bmp.save("edges.bmp");
 
-    // TODO Edge walker, find unvisited edges, walks along them to register them as vertex+edge
-    // TODO Min size for contours to throw away unwnated domains ??
-    // TODO Walk, from bottom to top, try tro walk bottom first agaiin, CW ?
-    // TODO Search cycles
-    let paths = create_constrained_edges(&vertices);
-    // println!("paths {:?}", paths);
-
-    let paths_bmp = create_paths_bitmap(&paths, &vertices.size);
+    let paths = convert_edges_to_paths(&pixels_edges);
+    // Debug output
+    let paths_bmp = create_paths_bitmap(&paths, output_frame_size);
     let _ = paths_bmp.save("paths.bmp");
+
+    let domains = get_domains_from_paths(output_frame_size, paths);
+    // Debug output
+    let domains_bmp = create_domains_bitmaps(&domains, output_frame_size);
+    for (i, domain_bmp) in domains_bmp.iter().enumerate() {
+        let _ = domain_bmp.save(format!("domain_{}.bmp", i));
+    }
+
+    // TODO Find paths hierarchy (who contains who)
 }
 
-#[derive(Clone, Debug, PartialEq)]
+fn get_domains_from_paths(frame_size: Size, mut paths: Paths) -> Vec<(Path, Buffer2D<bool>)> {
+    let mut domains = Vec::new();
+
+    while let Some(path) = paths.pop() {
+        // Initialize an emtpy domain
+        let mut domain = Buffer2D::new(false, frame_size);
+        // Mark paths vertices as in the domain
+        for p in path.iter() {
+            *domain.get_mut(p.0, p.1) = true;
+        }
+
+        // Initialize the stack
+        let mut flood_fill_stack = Vec::new();
+        flood_fill_stack.push(PixelPos { x: 0, y: 0 });
+
+        // Flood fill the domain exterior
+        while let Some(pixel) = flood_fill_stack.pop() {
+            *domain.get_mut(pixel.x as usize, pixel.y as usize) = true;
+
+            for delta in DIRECT_NEIGHBORS.iter() {
+                let (x, y) = (pixel.x as i32 + delta.0, pixel.y as i32 + delta.1);
+                if !domain.is_in_bounds(x, y) {
+                    // Ignore OOB points
+                    continue;
+                }
+                let pos = PixelPos {
+                    x: x as u32,
+                    y: y as u32,
+                };
+                if !domain.get(pos.x as usize, pos.y as usize) {
+                    flood_fill_stack.push(pos);
+                }
+            }
+        }
+
+        // Invert the domain data to fit inside the path
+        for v in domain.data.iter_mut() {
+            *v = !*v;
+        }
+
+        domains.push((path, domain));
+    }
+
+    domains
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct Size {
     w: usize,
     h: usize,
 }
-
-struct Flags {
-    pub verts: Vec<bool>,
-    pub size: Size,
-}
-impl Flags {
-    pub fn get(&self, x: usize, y: usize) -> bool {
-        self.verts[y * self.size.w + x]
-    }
-
-    pub fn get_mut(&mut self, x: usize, y: usize) -> &mut bool {
-        &mut self.verts[y * self.size.w + x]
+impl Size {
+    pub fn new(w: usize, h: usize) -> Self {
+        Self { w, h }
     }
 
     fn is_in_bounds(&self, x: i32, y: i32) -> bool {
-        x >= 0 && y >= 0 && (x as usize) < self.size.w && (y as usize) < self.size.h
+        x >= 0 && y >= 0 && (x as usize) < self.w && (y as usize) < self.h
+    }
+}
+
+struct Buffer2D<T: Copy> {
+    pub data: Vec<T>,
+    pub size: Size,
+}
+impl<T: Copy> Buffer2D<T> {
+    pub fn new(value: T, size: Size) -> Self {
+        Self {
+            data: vec![value; size.w * size.h],
+            size,
+        }
+    }
+
+    pub fn get(&self, x: usize, y: usize) -> T {
+        self.data[y * self.size.w + x]
+    }
+
+    pub fn get_mut(&mut self, x: usize, y: usize) -> &mut T {
+        &mut self.data[y * self.size.w + x]
+    }
+
+    fn is_in_bounds(&self, x: i32, y: i32) -> bool {
+        self.size.is_in_bounds(x, y)
     }
 }
 
@@ -63,114 +128,9 @@ fn vertex_dist(v1: VertexCoord, v2: VertexCoord) -> usize {
     v1.0.abs_diff(v2.0).max(v1.1.abs_diff(v2.1))
 }
 
-pub const MIN_PATH_SIZE: usize = 20;
-
 pub type VertexCoord = (usize, usize);
 pub type Path = Vec<VertexCoord>;
 pub type Paths = Vec<Path>;
-
-fn register_contours(visited_vertices: &mut Flags, vertices: &Flags) -> Vec<Path> {
-    let mut paths = Vec::new();
-
-    for x in (0..vertices.size.w - 3).step_by(3) {
-        for y in (0..vertices.size.h - 3).step_by(3) {
-            let mut sum_of_verts = 0;
-            let mut visited = false;
-            let mut side_vertices = Vec::new();
-            for i in 0..3 {
-                for j in 0..3 {
-                    if vertices.get(x + i, y + j) {
-                        sum_of_verts += 1;
-                        if i != 1 || j != 1 {
-                            side_vertices.push((x + i, y + j));
-                        }
-                    }
-                    if visited_vertices.get(x + i, y + j) {
-                        visited = true;
-                    }
-                }
-            }
-
-            // Center is a vertex, there are 3 in total, not visited and dist between the two side vertices is > 1
-            let is_path_shape = if vertices.get(x + 1, y + 1) && sum_of_verts == 3 && !visited {
-                vertex_dist(side_vertices[0], side_vertices[1]) > 1
-            } else {
-                false
-            };
-            if !is_path_shape {
-                continue;
-            }
-
-            // Exmaple schema:
-            // S . .
-            // . C .
-            // . E .
-            let path_center = (x + 1, y + 1);
-            let start = side_vertices[0];
-            let end = side_vertices[1];
-
-            println!(
-                "Found starting path shape x {} y {}, start {:?} end {:?}",
-                x, y, start, end
-            );
-
-            let path = pathfinding::prelude::astar(
-                &start,
-                |&(x, y)| {
-                    let mut successors = Vec::new();
-                    for i in -1..=1 {
-                        for j in -1..=1 {
-                            if i == 0 && j == 0 {
-                                continue;
-                            }
-                            let (xi, yj) = (x as i32 + i, y as i32 + j);
-                            if vertices.is_in_bounds(xi, yj) {
-                                let (xi, yj) = (xi as usize, yj as usize);
-                                if vertices.get(xi, yj) && path_center != (xi, yj) {
-                                    successors.push(((xi, yj), 1));
-                                }
-                            }
-                        }
-                    }
-                    successors
-                },
-                |&p| vertex_dist(p, end),
-                |&p| p == end,
-            );
-            // println!("Found path {:?}", path);
-
-            let Some(path) = path else {
-                continue;
-            };
-
-            println!("Found path with length {}", path.1);
-
-            // if path.1 < MIN_PATH_SIZE {
-            //     continue;
-            // }
-
-            // Mark pathed vertices as visited
-            for v in path.0.iter() {
-                *visited_vertices.get_mut(v.0, v.1) = true;
-            }
-
-            // TODO Register path as edges and vertices for the triangulation
-            paths.push(path.0);
-        }
-    }
-
-    paths
-}
-
-fn create_constrained_edges(vertices: &Flags) -> Paths {
-    let mut visited_vertices = Flags {
-        verts: vec![false; vertices.size.w * vertices.size.h],
-        size: vertices.size.clone(),
-    };
-
-    let paths = register_contours(&mut visited_vertices, vertices);
-    paths
-}
 
 pub const COLORS: &'static [Pixel] = &[
     RED,
@@ -185,7 +145,25 @@ pub const COLORS: &'static [Pixel] = &[
     BROWN,
 ];
 
-fn create_paths_bitmap(paths: &Paths, size: &Size) -> bmp::Image {
+fn create_domains_bitmaps(domains: &Vec<(Path, Buffer2D<bool>)>, size: Size) -> Vec<bmp::Image> {
+    let mut domains_bmps = Vec::new();
+
+    for (index, domain) in domains.iter().enumerate() {
+        let mut domain_bmp = bmp::Image::new(size.w as u32, size.h as u32);
+        let color = COLORS[index % COLORS.len()];
+        for x in 0..domain.1.size.w {
+            for y in 0..domain.1.size.h {
+                if domain.1.get(x, y) {
+                    domain_bmp.set_pixel(x as u32, y as u32, color);
+                };
+            }
+        }
+        domains_bmps.push(domain_bmp);
+    }
+    domains_bmps
+}
+
+fn create_paths_bitmap(paths: &Paths, size: Size) -> bmp::Image {
     let mut paths_bmp = bmp::Image::new(size.w as u32, size.h as u32);
 
     for (index, path) in paths.iter().enumerate() {
@@ -197,11 +175,11 @@ fn create_paths_bitmap(paths: &Paths, size: &Size) -> bmp::Image {
     paths_bmp
 }
 
-fn create_edges_bitmap(vertices: &Flags) -> bmp::Image {
-    let mut edges_bmp = bmp::Image::new(vertices.size.w as u32, vertices.size.h as u32);
-    for x in 0..vertices.size.w {
-        for y in 0..vertices.size.h {
-            let color = if vertices.get(x, y) { BLACK } else { WHITE };
+fn create_edges_bitmap(pixels_edges: &Buffer2D<bool>) -> bmp::Image {
+    let mut edges_bmp = bmp::Image::new(pixels_edges.size.w as u32, pixels_edges.size.h as u32);
+    for x in 0..pixels_edges.size.w {
+        for y in 0..pixels_edges.size.h {
+            let color = if pixels_edges.get(x, y) { BLACK } else { WHITE };
             edges_bmp.set_pixel(x as u32, y as u32, color);
         }
     }
@@ -209,17 +187,15 @@ fn create_edges_bitmap(vertices: &Flags) -> bmp::Image {
 }
 
 fn search_unvisited_domain_pixel(
-    visited_pixels: &Vec<bool>,
+    visited_pixels: &Buffer2D<bool>,
     img: &bmp::Image,
     color_to_triangulate: bmp::Pixel,
 ) -> Option<(u32, u32)> {
-    let (w, h) = (img.get_width(), img.get_height());
-
     let mut non_visited_domain_pixel = None;
-    for x in 0..w {
-        // Ignore bottom and top rows of the image
-        for y in 1..h - 1 {
-            if visited_pixels[y as usize * w as usize + x as usize] {
+    // We can safely borders of the image if we want here. Should not have any influence, just helps to avoid malformed images.
+    for x in 1..img.get_width() - 1 {
+        for y in 1..img.get_height() - 1 {
+            if visited_pixels.get(x as usize, y as usize) {
                 continue;
             }
             let color = img.get_pixel(x, y);
@@ -239,15 +215,15 @@ struct PixelPos {
     y: u32,
 }
 
-fn detect_edges_as_vertices(img: &bmp::Image, color_to_triangulate: bmp::Pixel) -> Flags {
-    let (img_w, img_h) = (img.get_width(), img.get_height());
-    let mut visited_pixels = vec![false; (img_w * img_h) as usize];
+const DIRECT_NEIGHBORS: [(i32, i32); 4] = [(-1, 0), (0, 1), (1, 0), (0, -1)];
 
-    let vertices_size = Size {
-        w: (img_w + 2) as usize,
-        h: (img_h + 2) as usize,
-    };
-    let mut vertices = vec![false; vertices_size.w * vertices_size.h];
+fn detect_edges(img: &bmp::Image, color_to_triangulate: bmp::Pixel) -> Buffer2D<bool> {
+    let img_size = Size::new(img.get_width() as usize, img.get_height() as usize);
+    let mut visited_pixels = Buffer2D::new(false, img_size);
+
+    // We increase size by 1 to be able to ensure void borders in edges_buffer
+    let buffer_size = Size::new(img_size.w + 2, img_size.h + 2);
+    let mut edges_buffer = Buffer2D::new(false, buffer_size);
 
     // Search non visited pixel of the color to triangulate
     while let Some(unvisited_domain_pixel) =
@@ -262,15 +238,14 @@ fn detect_edges_as_vertices(img: &bmp::Image, color_to_triangulate: bmp::Pixel) 
 
         // Flood fill to find the edges of the color to triangulate
         while let Some(pixel) = flood_fill_stack.pop() {
-            visited_pixels[(pixel.y * img_w + pixel.x) as usize] = true;
+            *visited_pixels.get_mut(pixel.x as usize, pixel.y as usize) = true;
 
-            for delta in vec![(-1, 0), (0, 1), (1, 0), (0, -1)] {
-                let x = pixel.x as i32 + delta.0;
-                let y = pixel.y as i32 + delta.1;
-                // Ignore bottom and top rows of the image
-                if x < 0 || x >= img_w as i32 || y <= 0 || y >= (img_h - 1) as i32 {
+            for delta in DIRECT_NEIGHBORS.iter() {
+                let (x, y) = (pixel.x as i32 + delta.0, pixel.y as i32 + delta.1);
+                if !img_size.is_in_bounds(x, y) {
                     // Outside of the image, register as an edge vertex
-                    vertices[(y + 1) as usize * vertices_size.w + (x + 1) as usize] = true;
+                    // Use pixel as the position, to leave void borders in edges_buffer
+                    *edges_buffer.get_mut((pixel.x + 1) as usize, (pixel.y + 1) as usize) = true;
                     continue;
                 }
                 let pos = PixelPos {
@@ -280,9 +255,9 @@ fn detect_edges_as_vertices(img: &bmp::Image, color_to_triangulate: bmp::Pixel) 
                 let neighbor_color = img.get_pixel(pos.x, pos.y);
                 if neighbor_color != color_to_triangulate {
                     // Color change, register as an edge vertex
-                    vertices[(y + 1) as usize * vertices_size.w + (x + 1) as usize] = true;
+                    *edges_buffer.get_mut((x + 1) as usize, (y + 1) as usize) = true;
                 } else {
-                    if !visited_pixels[(pos.y * img_w + pos.x) as usize] {
+                    if !visited_pixels.get(pos.x as usize, pos.y as usize) {
                         flood_fill_stack.push(pos);
                     }
                 }
@@ -290,8 +265,95 @@ fn detect_edges_as_vertices(img: &bmp::Image, color_to_triangulate: bmp::Pixel) 
         }
     }
 
-    Flags {
-        verts: vertices,
-        size: vertices_size,
+    edges_buffer
+}
+
+fn convert_edges_to_paths(pixels_edges: &Buffer2D<bool>) -> Vec<Path> {
+    let mut visited_vertices = Buffer2D::new(false, pixels_edges.size);
+    let mut paths = Vec::new();
+
+    // Iterate the whole image with 3x3 squares
+    for x in (0..pixels_edges.size.w - 3).step_by(3) {
+        for y in (0..pixels_edges.size.h - 3).step_by(3) {
+            // Find valid path-like shapes
+            let mut visited = false;
+            let mut side_vertices = Vec::new();
+            for i in 0..3 {
+                for j in 0..3 {
+                    if pixels_edges.get(x + i, y + j) {
+                        if i != 1 || j != 1 {
+                            side_vertices.push((x + i, y + j));
+                        }
+                    }
+                    if visited_vertices.get(x + i, y + j) {
+                        visited = true;
+                    }
+                }
+            }
+
+            // Center is a vertex, not visited, there are exactly 2 sides vertices, and the dist between the two side vertices is > 1
+            let is_valid_path_shape = pixels_edges.get(x + 1, y + 1)
+                && !visited
+                && side_vertices.len() == 2
+                && vertex_dist(side_vertices[0], side_vertices[1]) > 1;
+            if !is_valid_path_shape {
+                continue;
+            }
+
+            // Example path-like shape:
+            // S . .
+            // . C .
+            // . E .
+            let path_center = (x + 1, y + 1);
+            let path_start = side_vertices[0];
+            let path_end = side_vertices[1];
+
+            // Pathfind from Start to End, ignoring Center
+            let path = pathfinding::prelude::astar(
+                &path_start,
+                |&(x, y)| {
+                    let mut successors = Vec::new();
+                    for i in -1..=1 {
+                        for j in -1..=1 {
+                            if i == 0 && j == 0 {
+                                continue;
+                            }
+                            let (xi, yj) = (x as i32 + i, y as i32 + j);
+                            if pixels_edges.is_in_bounds(xi, yj) {
+                                let (xi, yj) = (xi as usize, yj as usize);
+                                if pixels_edges.get(xi, yj) && path_center != (xi, yj) {
+                                    successors.push(((xi, yj), 1));
+                                }
+                            }
+                        }
+                    }
+                    successors
+                },
+                |&p| vertex_dist(p, path_end),
+                |&p| p == path_end,
+            );
+
+            let Some(mut path) = path else {
+                continue;
+            };
+
+            // Re-add the center vertex to the path
+            path.0.push(path_center);
+
+            println!("Found path with length {}", path.1);
+
+            if path.1 < MIN_PATH_SIZE {
+                continue;
+            }
+
+            // Mark pathed vertices as visited
+            for v in path.0.iter() {
+                *visited_vertices.get_mut(v.0, v.1) = true;
+            }
+
+            paths.push(path.0);
+        }
     }
+
+    paths
 }
