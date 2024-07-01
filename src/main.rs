@@ -6,7 +6,10 @@ use bmp::{
 };
 
 // let frame :String = "./assets/bad_apple_no_lags_000/bad_apple_no_lags_050.bmp";
-const FRAME: &str = "./assets/bad_apple_no_lags_000/bad_apple_no_lags_170.bmp";
+// const FRAME: &str = "./assets/bad_apple_no_lags_000/bad_apple_no_lags_170.bmp";
+// const FRAME: &str = "./assets/bad_apple_no_lags_000/bad_apple_no_lags_180.bmp";
+const FRAME: &str = "./assets/bad_apple_no_lags_000/bad_apple_no_lags_196.bmp";
+// const FRAME: &str = "./assets/bad_apple_no_lags_000/bad_apple_no_lags_236.bmp";
 const COLOR_TO_TRIANGULATE: Pixel = WHITE;
 
 pub const MIN_PATH_SIZE: usize = 12;
@@ -34,53 +37,33 @@ fn main() {
         let _ = domain_bmp.save(format!("domain_{}.bmp", i));
     }
 
-    // TODO Find paths hierarchy (who contains who)
+    let orientations = get_orientations_from_domains(&domains);
+    // Debug output
+    let oriented_paths_bmp =
+        create_oriented_paths_bitmap(&domains, orientations, output_frame_size);
+    let _ = oriented_paths_bmp.save("oriented_paths.bmp");
 }
 
-fn get_domains_from_paths(frame_size: Size, mut paths: Paths) -> Vec<(Path, Buffer2D<bool>)> {
-    let mut domains = Vec::new();
-
-    while let Some(path) = paths.pop() {
-        // Initialize an emtpy domain
-        let mut domain = Buffer2D::new(false, frame_size);
-        // Mark paths vertices as in the domain
-        for p in path.iter() {
-            *domain.get_mut(p.0, p.1) = true;
+#[derive(Debug, Default, Copy, Clone)]
+pub enum Orientation {
+    #[default]
+    CW,
+    CCW,
+}
+impl Orientation {
+    fn opposite(&self) -> Orientation {
+        match self {
+            Orientation::CW => Orientation::CCW,
+            Orientation::CCW => Orientation::CW,
         }
-
-        // Initialize the stack
-        let mut flood_fill_stack = Vec::new();
-        flood_fill_stack.push(PixelPos { x: 0, y: 0 });
-
-        // Flood fill the domain exterior
-        while let Some(pixel) = flood_fill_stack.pop() {
-            *domain.get_mut(pixel.x as usize, pixel.y as usize) = true;
-
-            for delta in DIRECT_NEIGHBORS.iter() {
-                let (x, y) = (pixel.x as i32 + delta.0, pixel.y as i32 + delta.1);
-                if !domain.is_in_bounds(x, y) {
-                    // Ignore OOB points
-                    continue;
-                }
-                let pos = PixelPos {
-                    x: x as u32,
-                    y: y as u32,
-                };
-                if !domain.get(pos.x as usize, pos.y as usize) {
-                    flood_fill_stack.push(pos);
-                }
-            }
-        }
-
-        // Invert the domain data to fit inside the path
-        for v in domain.data.iter_mut() {
-            *v = !*v;
-        }
-
-        domains.push((path, domain));
     }
+}
 
-    domains
+pub type DomainId = usize;
+#[derive(Default, Clone, Debug)]
+pub struct DomainHierarchy {
+    children: Vec<DomainId>,
+    parent: Option<DomainId>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -145,24 +128,6 @@ pub const COLORS: &'static [Pixel] = &[
     BROWN,
 ];
 
-fn create_domains_bitmaps(domains: &Vec<(Path, Buffer2D<bool>)>, size: Size) -> Vec<bmp::Image> {
-    let mut domains_bmps = Vec::new();
-
-    for (index, domain) in domains.iter().enumerate() {
-        let mut domain_bmp = bmp::Image::new(size.w as u32, size.h as u32);
-        let color = COLORS[index % COLORS.len()];
-        for x in 0..domain.1.size.w {
-            for y in 0..domain.1.size.h {
-                if domain.1.get(x, y) {
-                    domain_bmp.set_pixel(x as u32, y as u32, color);
-                };
-            }
-        }
-        domains_bmps.push(domain_bmp);
-    }
-    domains_bmps
-}
-
 fn create_paths_bitmap(paths: &Paths, size: Size) -> bmp::Image {
     let mut paths_bmp = bmp::Image::new(size.w as u32, size.h as u32);
 
@@ -184,6 +149,43 @@ fn create_edges_bitmap(pixels_edges: &Buffer2D<bool>) -> bmp::Image {
         }
     }
     edges_bmp
+}
+
+fn create_domains_bitmaps(domains: &Vec<(Path, Buffer2D<bool>)>, size: Size) -> Vec<bmp::Image> {
+    let mut domains_bmps = Vec::new();
+
+    for (index, domain) in domains.iter().enumerate() {
+        let mut domain_bmp = bmp::Image::new(size.w as u32, size.h as u32);
+        let color = COLORS[index % COLORS.len()];
+        for x in 0..domain.1.size.w {
+            for y in 0..domain.1.size.h {
+                if domain.1.get(x, y) {
+                    domain_bmp.set_pixel(x as u32, y as u32, color);
+                };
+            }
+        }
+        domains_bmps.push(domain_bmp);
+    }
+    domains_bmps
+}
+
+fn create_oriented_paths_bitmap(
+    domains: &Vec<(Path, Buffer2D<bool>)>,
+    orientations: Vec<Orientation>,
+    size: Size,
+) -> bmp::Image {
+    let mut bmp = bmp::Image::new(size.w as u32, size.h as u32);
+
+    for (index, (path, _domain)) in domains.iter().enumerate() {
+        let color = match orientations[index] {
+            Orientation::CW => YELLOW,
+            Orientation::CCW => BLUE_VIOLET,
+        };
+        for v in path.iter() {
+            bmp.set_pixel(v.0 as u32, v.1 as u32, color);
+        }
+    }
+    bmp
 }
 
 fn search_unvisited_domain_pixel(
@@ -356,4 +358,107 @@ fn convert_edges_to_paths(pixels_edges: &Buffer2D<bool>) -> Vec<Path> {
     }
 
     paths
+}
+
+fn get_domains_from_paths(frame_size: Size, mut paths: Paths) -> Vec<(Path, Buffer2D<bool>)> {
+    let mut domains = Vec::new();
+
+    while let Some(path) = paths.pop() {
+        // Initialize an emtpy domain
+        let mut domain = Buffer2D::new(false, frame_size);
+        // Mark paths vertices as in the domain
+        for p in path.iter() {
+            *domain.get_mut(p.0, p.1) = true;
+        }
+
+        // Initialize the stack
+        let mut flood_fill_stack = Vec::new();
+        flood_fill_stack.push(PixelPos { x: 0, y: 0 });
+
+        // Flood fill the domain exterior
+        while let Some(pixel) = flood_fill_stack.pop() {
+            *domain.get_mut(pixel.x as usize, pixel.y as usize) = true;
+
+            for delta in DIRECT_NEIGHBORS.iter() {
+                let (x, y) = (pixel.x as i32 + delta.0, pixel.y as i32 + delta.1);
+                if !domain.is_in_bounds(x, y) {
+                    // Ignore OOB points
+                    continue;
+                }
+                let pos = PixelPos {
+                    x: x as u32,
+                    y: y as u32,
+                };
+                if !domain.get(pos.x as usize, pos.y as usize) {
+                    flood_fill_stack.push(pos);
+                }
+            }
+        }
+
+        // Invert the domain data to fit inside the path
+        for v in domain.data.iter_mut() {
+            *v = !*v;
+        }
+
+        domains.push((path, domain));
+    }
+
+    domains
+}
+
+fn get_orientations_from_domains(domains: &Vec<(Path, Buffer2D<bool>)>) -> Vec<Orientation> {
+    // Find paths hierarchy (who contains who), then invert orientation for each level
+    let mut hierarchies = vec![DomainHierarchy::default(); domains.len()];
+    for (i, (path, domain)) in domains.iter().enumerate() {
+        for (j, (other_path, other_domain)) in domains[i + 1..domains.len()].iter().enumerate() {
+            let j = j + i + 1;
+
+            if domain.get(other_path[0].0, other_path[0].1)
+                && !other_domain.get(path[0].0, path[0].1)
+            {
+                // i C j
+                hierarchies[i].children.push(j);
+                hierarchies[j].parent = Some(i);
+            } else if other_domain.get(path[0].0, path[0].1)
+                && !domain.get(other_path[0].0, other_path[0].1)
+            {
+                // j C i
+                hierarchies[j].children.push(i);
+                hierarchies[i].parent = Some(j);
+            }
+        }
+    }
+
+    let mut orientations = vec![Orientation::default(); domains.len()];
+    // Search all the root domains (not contained by any other domains) and set orientaitons for their hierarchy
+    for (id, hierarchy) in hierarchies.iter().enumerate() {
+        if hierarchy.parent.is_none() {
+            set_orientations_with_recursive_hierarchy_walk(
+                id,
+                orientations[id],
+                &mut orientations,
+                &hierarchies,
+            );
+        }
+    }
+
+    orientations
+}
+
+pub fn set_orientations_with_recursive_hierarchy_walk(
+    parent_hierarchy_id: DomainId,
+    parent_orientation: Orientation,
+    orientations: &mut Vec<Orientation>,
+    hierarchies: &Vec<DomainHierarchy>,
+) {
+    let child_orientation = parent_orientation.opposite();
+    for child_id in hierarchies[parent_hierarchy_id].children.iter() {
+        orientations[*child_id] = child_orientation;
+        set_orientations_with_recursive_hierarchy_walk(
+            *child_id,
+            child_orientation,
+            orientations,
+            hierarchies,
+        );
+    }
 }
