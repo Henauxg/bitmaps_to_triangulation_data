@@ -7,8 +7,8 @@ use bmp::{
 
 // const FRAME: &str = "./assets/bad_apple_no_lags_000/bad_apple_no_lags_050.bmp";
 // const FRAME: &str = "./assets/bad_apple_no_lags_000/bad_apple_no_lags_170.bmp";
-// const FRAME: &str = "./assets/bad_apple_no_lags_000/bad_apple_no_lags_180.bmp";
-const FRAME: &str = "./assets/bad_apple_no_lags_000/bad_apple_no_lags_196.bmp";
+const FRAME: &str = "./assets/bad_apple_no_lags_000/bad_apple_no_lags_180.bmp";
+// const FRAME: &str = "./assets/bad_apple_no_lags_000/bad_apple_no_lags_196.bmp";
 // const FRAME: &str = "./assets/bad_apple_no_lags_000/bad_apple_no_lags_236.bmp";
 const COLOR_TO_TRIANGULATE: Pixel = WHITE;
 
@@ -31,7 +31,7 @@ fn main() {
     let paths_bmp = create_paths_bitmap(&paths, output_frame_size);
     let _ = paths_bmp.save("paths.bmp");
 
-    let domains = get_domains_from_paths(output_frame_size, paths);
+    let mut domains = get_domains_from_paths(output_frame_size, paths);
     // Debug output
     let domains_bmp = create_domains_bitmaps(&domains, output_frame_size);
     for (i, domain_bmp) in domains_bmp.iter().enumerate() {
@@ -40,10 +40,38 @@ fn main() {
 
     let kinds = get_domains_kinds(&domains);
     // Debug output
-    let paths_kinds_bmp = create_domains_kinds_bitmap(&domains, kinds, output_frame_size);
+    let paths_kinds_bmp = create_domains_kinds_bitmap(&domains, &kinds, output_frame_size);
     let _ = paths_kinds_bmp.save("paths_kinds.bmp");
 
     let orientations = get_domains_paths_orientations(&domains);
+
+    // TODO Paths simplification. Remove (some) redondant vertices
+    simplify_paths_vertices(&mut domains);
+    let simplified_paths_bmp = create_domains_kinds_bitmap(&domains, &kinds, output_frame_size);
+    let _ = simplified_paths_bmp.save("simplified_paths.bmp");
+}
+
+fn simplify_paths_vertices(domains: &mut Vec<(Path, Buffer2D<bool>)>) {
+    for (path, _domain) in domains.iter_mut() {
+        let mut simplified_path = Path::new();
+        let mut current_delta = (
+            (path[0].0 as i32) - (path[path.len() - 1].0 as i32),
+            (path[0].1 as i32) - (path[path.len() - 1].1 as i32),
+        );
+        for i in 1..path.len() {
+            let delta = (
+                (path[i].0 as i32) - (path[i - 1].0 as i32),
+                (path[i].1 as i32) - (path[i - 1].1 as i32),
+            );
+            if delta != current_delta {
+                simplified_path.push(path[i - 1]);
+            }
+            current_delta = delta;
+        }
+        // Quick & dirty: simply force the end point to be in
+        simplified_path.push(path[path.len() - 1]);
+        *path = simplified_path;
+    }
 }
 
 #[derive(Debug, Default, Copy, Clone)]
@@ -188,7 +216,7 @@ fn create_domains_bitmaps(domains: &Vec<(Path, Buffer2D<bool>)>, size: Size) -> 
 
 fn create_domains_kinds_bitmap(
     domains: &Vec<(Path, Buffer2D<bool>)>,
-    kinds: Vec<DomainKind>,
+    kinds: &Vec<DomainKind>,
     size: Size,
 ) -> bmp::Image {
     let mut bmp = bmp::Image::new(size.w as u32, size.h as u32);
