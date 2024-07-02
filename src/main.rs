@@ -5,7 +5,7 @@ use bmp::{
     Pixel,
 };
 
-// let frame :String = "./assets/bad_apple_no_lags_000/bad_apple_no_lags_050.bmp";
+// const FRAME: &str = "./assets/bad_apple_no_lags_000/bad_apple_no_lags_050.bmp";
 // const FRAME: &str = "./assets/bad_apple_no_lags_000/bad_apple_no_lags_170.bmp";
 // const FRAME: &str = "./assets/bad_apple_no_lags_000/bad_apple_no_lags_180.bmp";
 const FRAME: &str = "./assets/bad_apple_no_lags_000/bad_apple_no_lags_196.bmp";
@@ -292,8 +292,8 @@ fn convert_edges_to_paths(pixels_edges: &Buffer2D<bool>) -> Vec<Path> {
     let mut paths = Vec::new();
 
     // Iterate the whole image with 3x3 squares
-    for x in (0..pixels_edges.size.w - 3).step_by(3) {
-        for y in (0..pixels_edges.size.h - 3).step_by(3) {
+    for x in (0..pixels_edges.size.w - 3).step_by(1) {
+        for y in (0..pixels_edges.size.h - 3).step_by(1) {
             // Find valid path-like shapes
             let mut visited = false;
             let mut side_vertices = Vec::new();
@@ -338,7 +338,9 @@ fn convert_edges_to_paths(pixels_edges: &Buffer2D<bool>) -> Vec<Path> {
                                 continue;
                             }
                             let (xi, yj) = (x as i32 + i, y as i32 + j);
-                            if pixels_edges.is_in_bounds(xi, yj) {
+                            if pixels_edges.is_in_bounds(xi, yj)
+                                && !visited_vertices.get(xi as usize, yj as usize)
+                            {
                                 let (xi, yj) = (xi as usize, yj as usize);
                                 if pixels_edges.get(xi, yj) && path_center != (xi, yj) {
                                     successors.push(((xi, yj), 1));
@@ -361,7 +363,7 @@ fn convert_edges_to_paths(pixels_edges: &Buffer2D<bool>) -> Vec<Path> {
 
             println!("Found path with length {}", path.1);
 
-            if path.1 < MIN_PATH_SIZE {
+            if path.1 + 1 < MIN_PATH_SIZE {
                 continue;
             }
 
