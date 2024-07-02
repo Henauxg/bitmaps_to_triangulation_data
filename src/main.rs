@@ -12,9 +12,10 @@ const FRAME: &str = "./assets/bad_apple_no_lags_000/bad_apple_no_lags_196.bmp";
 // const FRAME: &str = "./assets/bad_apple_no_lags_000/bad_apple_no_lags_236.bmp";
 const COLOR_TO_TRIANGULATE: Pixel = WHITE;
 
-pub const MIN_PATH_SIZE: usize = 12;
+pub const MIN_PATH_SIZE: usize = 3;
 
 fn main() {
+    // Note 0,0 is the upper left corner of the image
     let img = bmp::open(FRAME).unwrap_or_else(|e| {
         panic!("Failed to open: {}", e);
     });
@@ -37,11 +38,12 @@ fn main() {
         let _ = domain_bmp.save(format!("domain_{}.bmp", i));
     }
 
-    let orientations = get_orientations_from_domains(&domains);
+    let kinds = get_domains_kinds(&domains);
     // Debug output
-    let oriented_paths_bmp =
-        create_oriented_paths_bitmap(&domains, orientations, output_frame_size);
-    let _ = oriented_paths_bmp.save("oriented_paths.bmp");
+    let paths_kinds_bmp = create_domains_kinds_bitmap(&domains, kinds, output_frame_size);
+    let _ = paths_kinds_bmp.save("paths_kinds.bmp");
+
+    let orientations = get_domains_paths_orientations(&domains);
 }
 
 #[derive(Debug, Default, Copy, Clone)]
@@ -55,6 +57,21 @@ impl Orientation {
         match self {
             Orientation::CW => Orientation::CCW,
             Orientation::CCW => Orientation::CW,
+        }
+    }
+}
+
+#[derive(Debug, Default, Copy, Clone)]
+pub enum DomainKind {
+    #[default]
+    Filled,
+    Hollow,
+}
+impl DomainKind {
+    fn opposite(&self) -> DomainKind {
+        match self {
+            DomainKind::Filled => DomainKind::Hollow,
+            DomainKind::Hollow => DomainKind::Filled,
         }
     }
 }
@@ -169,17 +186,17 @@ fn create_domains_bitmaps(domains: &Vec<(Path, Buffer2D<bool>)>, size: Size) -> 
     domains_bmps
 }
 
-fn create_oriented_paths_bitmap(
+fn create_domains_kinds_bitmap(
     domains: &Vec<(Path, Buffer2D<bool>)>,
-    orientations: Vec<Orientation>,
+    kinds: Vec<DomainKind>,
     size: Size,
 ) -> bmp::Image {
     let mut bmp = bmp::Image::new(size.w as u32, size.h as u32);
 
     for (index, (path, _domain)) in domains.iter().enumerate() {
-        let color = match orientations[index] {
-            Orientation::CW => YELLOW,
-            Orientation::CCW => BLUE_VIOLET,
+        let color = match kinds[index] {
+            DomainKind::Filled => YELLOW,
+            DomainKind::Hollow => BLUE_VIOLET,
         };
         for v in path.iter() {
             bmp.set_pixel(v.0 as u32, v.1 as u32, color);
@@ -406,7 +423,7 @@ fn get_domains_from_paths(frame_size: Size, mut paths: Paths) -> Vec<(Path, Buff
     domains
 }
 
-fn get_orientations_from_domains(domains: &Vec<(Path, Buffer2D<bool>)>) -> Vec<Orientation> {
+fn get_domains_kinds(domains: &Vec<(Path, Buffer2D<bool>)>) -> Vec<DomainKind> {
     // Find paths hierarchy (who contains who), then invert orientation for each level
     let mut hierarchies = vec![DomainHierarchy::default(); domains.len()];
     for (i, (path, domain)) in domains.iter().enumerate() {
@@ -429,36 +446,73 @@ fn get_orientations_from_domains(domains: &Vec<(Path, Buffer2D<bool>)>) -> Vec<O
         }
     }
 
-    let mut orientations = vec![Orientation::default(); domains.len()];
+    let mut kinds = vec![DomainKind::default(); domains.len()];
     // Search all the root domains (not contained by any other domains) and set orientaitons for their hierarchy
     for (id, hierarchy) in hierarchies.iter().enumerate() {
         if hierarchy.parent.is_none() {
-            set_orientations_with_recursive_hierarchy_walk(
-                id,
-                orientations[id],
-                &mut orientations,
-                &hierarchies,
-            );
+            set_kinds_with_recursive_hierarchy_walk(id, kinds[id], &mut kinds, &hierarchies);
         }
     }
 
-    orientations
+    kinds
 }
 
-pub fn set_orientations_with_recursive_hierarchy_walk(
+pub fn set_kinds_with_recursive_hierarchy_walk(
     parent_hierarchy_id: DomainId,
-    parent_orientation: Orientation,
-    orientations: &mut Vec<Orientation>,
+    parent_kind: DomainKind,
+    kinds: &mut Vec<DomainKind>,
     hierarchies: &Vec<DomainHierarchy>,
 ) {
-    let child_orientation = parent_orientation.opposite();
+    let child_kind = parent_kind.opposite();
     for child_id in hierarchies[parent_hierarchy_id].children.iter() {
-        orientations[*child_id] = child_orientation;
-        set_orientations_with_recursive_hierarchy_walk(
-            *child_id,
-            child_orientation,
-            orientations,
-            hierarchies,
-        );
+        kinds[*child_id] = child_kind;
+        set_kinds_with_recursive_hierarchy_walk(*child_id, child_kind, kinds, hierarchies);
     }
+}
+
+fn get_domains_paths_orientations(domains: &Vec<(Path, Buffer2D<bool>)>) -> Vec<Orientation> {
+    // Paths orientations are != based on the starting shape+location.. See if it lies to the right or left of the path => gives the path orientation.
+    let mut orientations = Vec::with_capacity(domains.len());
+    for (path, domain) in domains.iter() {
+        let delta_x = (path[1].0 as i32) - (path[0].0 as i32);
+        let delta_y = (path[1].1 as i32) - (path[0].1 as i32);
+        // Quick & dirty. Might discard left neighbor
+        let (right_neighbor, _left_neigh) = if delta_x == 1 && delta_y == -1 {
+            (
+                (path[0].0 as i32 + 1, path[0].1 as i32),
+                (path[0].0 as i32, path[0].1 as i32 - 1),
+            )
+        } else if delta_x == 1 && delta_y == 1 {
+            (
+                (path[0].0 as i32, path[0].1 as i32 + 1),
+                (path[0].0 as i32 + 1, path[0].1 as i32),
+            )
+        } else if delta_x == -1 && delta_y == -1 {
+            (
+                (path[0].0 as i32, path[0].1 as i32 - 1),
+                (path[0].0 as i32 - 1, path[0].1 as i32),
+            )
+        } else if delta_x == -1 && delta_y == 1 {
+            (
+                (path[0].0 as i32 - 1, path[0].1 as i32),
+                (path[0].0 as i32, path[0].1 as i32 + 1),
+            )
+        } else {
+            // delta_x == 0 || delta_y == 0
+            (
+                (path[0].0 as i32 - delta_y, path[0].1 as i32 + delta_x),
+                (path[0].0 as i32 + delta_y, path[0].1 as i32 - delta_x),
+            )
+        };
+
+        let path_vertices_orientation =
+            if domain.get(right_neighbor.0 as usize, right_neighbor.1 as usize) {
+                Orientation::CW
+            } else {
+                Orientation::CCW
+            };
+        orientations.push(path_vertices_orientation);
+    }
+
+    orientations
 }
