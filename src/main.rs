@@ -7,10 +7,13 @@ use bmp::{
 
 // const FRAME: &str = "./assets/bad_apple_no_lags_000/bad_apple_no_lags_050.bmp";
 // const FRAME: &str = "./assets/bad_apple_no_lags_000/bad_apple_no_lags_170.bmp";
-const FRAME: &str = "./assets/bad_apple_no_lags_000/bad_apple_no_lags_180.bmp";
+// const FRAME: &str = "./assets/bad_apple_no_lags_000/bad_apple_no_lags_180.bmp";
 // const FRAME: &str = "./assets/bad_apple_no_lags_000/bad_apple_no_lags_196.bmp";
 // const FRAME: &str = "./assets/bad_apple_no_lags_000/bad_apple_no_lags_236.bmp";
-const COLOR_TO_TRIANGULATE: Pixel = WHITE;
+
+const FRAME: &str = "./assets/bad_apple_no_lags_000/bad_apple_no_lags_090.bmp";
+
+const COLOR_TO_TRIANGULATE: Pixel = BLACK;
 
 pub const MIN_PATH_SIZE: usize = 3;
 
@@ -45,10 +48,47 @@ fn main() {
 
     let orientations = get_domains_paths_orientations(&domains);
 
-    // TODO Paths simplification. Remove (some) redondant vertices
+    // Paths simplification. Remove (some) redondant vertices. Could do more
     simplify_paths_vertices(&mut domains);
     let simplified_paths_bmp = create_domains_kinds_bitmap(&domains, &kinds, output_frame_size);
     let _ = simplified_paths_bmp.save("simplified_paths.bmp");
+
+    // Convert path to vertices
+    let mut vertices = Vec::new();
+    let mut edges = Vec::new();
+
+    for (((path, _domain), kind), orientation) in domains.iter().zip(kinds).zip(orientations) {
+        let first_vertex = vertices.len();
+        for v in path.iter() {
+            // TODO Re-Center
+            // Y bitmap axis is inverted.
+            vertices.push((v.0 as f32, -(v.1 as f32)));
+        }
+        let last_vertex = vertices.len() - 1;
+
+        let invert = match orientation {
+            Orientation::CW => match kind {
+                DomainKind::Filled => false,
+                DomainKind::Hollow => true,
+            },
+            Orientation::CCW => match kind {
+                DomainKind::Filled => true,
+                DomainKind::Hollow => false,
+            },
+        };
+        match invert {
+            true => {
+                edges.extend((first_vertex..last_vertex).map(|i| (i + 1, i)));
+                edges.push((first_vertex, last_vertex));
+            }
+            false => {
+                edges.extend((first_vertex..last_vertex).map(|i| (i, i + 1)));
+                edges.push((last_vertex, first_vertex));
+            }
+        }
+    }
+
+    // TODO Export to file
 }
 
 fn simplify_paths_vertices(domains: &mut Vec<(Path, Buffer2D<bool>)>) {
@@ -81,7 +121,7 @@ pub enum Orientation {
     CCW,
 }
 impl Orientation {
-    fn opposite(&self) -> Orientation {
+    pub fn opposite(&self) -> Orientation {
         match self {
             Orientation::CW => Orientation::CCW,
             Orientation::CCW => Orientation::CW,
