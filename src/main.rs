@@ -1,9 +1,18 @@
+use std::{
+    fs::File,
+    io::{BufWriter, Write},
+};
+
 use bmp::{
     consts::{
         ALICE_BLUE, BLACK, BLUE, BLUE_VIOLET, BROWN, GREEN, ORANGE, PINK, RED, WHITE, YELLOW,
     },
     Pixel,
 };
+use serde::Serialize;
+
+// Really quick & dirty
+const DEBUG_OUTPUT: bool = true;
 
 // const FRAME: &str = "./assets/bad_apple_no_lags_000/bad_apple_no_lags_050.bmp";
 // const FRAME: &str = "./assets/bad_apple_no_lags_000/bad_apple_no_lags_170.bmp";
@@ -11,60 +20,91 @@ use bmp::{
 // const FRAME: &str = "./assets/bad_apple_no_lags_000/bad_apple_no_lags_196.bmp";
 // const FRAME: &str = "./assets/bad_apple_no_lags_000/bad_apple_no_lags_236.bmp";
 
-const FRAME: &str = "./assets/bad_apple_no_lags_000/bad_apple_no_lags_090.bmp";
-
 const COLOR_TO_TRIANGULATE: Pixel = BLACK;
-
 pub const MIN_PATH_SIZE: usize = 3;
 
-fn main() {
-    // Note 0,0 is the upper left corner of the image
-    let img = bmp::open(FRAME).unwrap_or_else(|e| {
-        panic!("Failed to open: {}", e);
-    });
+#[derive(Debug, Serialize)]
+pub struct Frame {
+    pub vertices: Vec<(i32, i32)>,
+    pub edges: Vec<(usize, usize)>,
+}
+impl Frame {
+    fn new() -> Self {
+        Self {
+            vertices: Vec::new(),
+            edges: Vec::new(),
+        }
+    }
+}
 
+fn main() {
+    // TODO Black & white frame: may invert the color to triangulate
+    let mut frames = Vec::new();
+    for i in 0..=200 {
+        let frame_bmp_img = bmp::open(format!(
+            "./assets/bad_apple_no_lags_000/bad_apple_no_lags_{:03}.bmp",
+            i
+        ))
+        .unwrap();
+        let processed_frame = process_frame(&frame_bmp_img);
+        frames.push(processed_frame);
+    }
+
+    let file = File::create("bad_apple_frames.msgpack").unwrap();
+    let mut writer = BufWriter::new(file);
+    let bytes = rmp_serde::to_vec(&frames).unwrap();
+    writer.write_all(&bytes).unwrap();
+    writer.flush().unwrap();
+}
+
+fn process_frame(img: &bmp::Image) -> Frame {
+    // Note 0,0 is the upper left corner of the image
     let pixels_edges = detect_edges(&img, COLOR_TO_TRIANGULATE);
     let output_frame_size = pixels_edges.size;
-    // Debug output
-    let edges_bmp = create_edges_bitmap(&pixels_edges);
-    let _ = edges_bmp.save("edges.bmp");
+    if DEBUG_OUTPUT {
+        let edges_bmp = create_edges_bitmap(&pixels_edges);
+        let _ = edges_bmp.save("edges.bmp");
+    }
 
     let paths = convert_edges_to_paths(&pixels_edges);
-    // Debug output
-    let paths_bmp = create_paths_bitmap(&paths, output_frame_size);
-    let _ = paths_bmp.save("paths.bmp");
+    if DEBUG_OUTPUT {
+        let paths_bmp = create_paths_bitmap(&paths, output_frame_size);
+        let _ = paths_bmp.save("paths.bmp");
+    }
 
     let mut domains = get_domains_from_paths(output_frame_size, paths);
-    // Debug output
-    let domains_bmp = create_domains_bitmaps(&domains, output_frame_size);
-    for (i, domain_bmp) in domains_bmp.iter().enumerate() {
-        let _ = domain_bmp.save(format!("domain_{}.bmp", i));
+    if DEBUG_OUTPUT {
+        let domains_bmp = create_domains_bitmaps(&domains, output_frame_size);
+        for (i, domain_bmp) in domains_bmp.iter().enumerate() {
+            let _ = domain_bmp.save(format!("domain_{}.bmp", i));
+        }
     }
 
     let kinds = get_domains_kinds(&domains);
-    // Debug output
-    let paths_kinds_bmp = create_domains_kinds_bitmap(&domains, &kinds, output_frame_size);
-    let _ = paths_kinds_bmp.save("paths_kinds.bmp");
+    if DEBUG_OUTPUT {
+        let paths_kinds_bmp = create_domains_kinds_bitmap(&domains, &kinds, output_frame_size);
+        let _ = paths_kinds_bmp.save("paths_kinds.bmp");
+    }
 
     let orientations = get_domains_paths_orientations(&domains);
 
     // Paths simplification. Remove (some) redondant vertices. Could do more
     simplify_paths_vertices(&mut domains);
-    let simplified_paths_bmp = create_domains_kinds_bitmap(&domains, &kinds, output_frame_size);
-    let _ = simplified_paths_bmp.save("simplified_paths.bmp");
+    if DEBUG_OUTPUT {
+        let simplified_paths_bmp = create_domains_kinds_bitmap(&domains, &kinds, output_frame_size);
+        let _ = simplified_paths_bmp.save("simplified_paths.bmp");
+    }
 
     // Convert path to vertices
-    let mut vertices = Vec::new();
-    let mut edges = Vec::new();
-
+    let mut frame = Frame::new();
     for (((path, _domain), kind), orientation) in domains.iter().zip(kinds).zip(orientations) {
-        let first_vertex = vertices.len();
+        let first_vertex = frame.vertices.len();
         for v in path.iter() {
             // TODO Re-Center
             // Y bitmap axis is inverted.
-            vertices.push((v.0 as f32, -(v.1 as f32)));
+            frame.vertices.push((v.0 as i32, -(v.1 as i32)));
         }
-        let last_vertex = vertices.len() - 1;
+        let last_vertex = frame.vertices.len() - 1;
 
         let invert = match orientation {
             Orientation::CW => match kind {
@@ -78,17 +118,20 @@ fn main() {
         };
         match invert {
             true => {
-                edges.extend((first_vertex..last_vertex).map(|i| (i + 1, i)));
-                edges.push((first_vertex, last_vertex));
+                frame
+                    .edges
+                    .extend((first_vertex..last_vertex).map(|i| (i + 1, i)));
+                frame.edges.push((first_vertex, last_vertex));
             }
             false => {
-                edges.extend((first_vertex..last_vertex).map(|i| (i, i + 1)));
-                edges.push((last_vertex, first_vertex));
+                frame
+                    .edges
+                    .extend((first_vertex..last_vertex).map(|i| (i, i + 1)));
+                frame.edges.push((last_vertex, first_vertex));
             }
         }
     }
-
-    // TODO Export to file
+    frame
 }
 
 fn simplify_paths_vertices(domains: &mut Vec<(Path, Buffer2D<bool>)>) {
@@ -428,8 +471,6 @@ fn convert_edges_to_paths(pixels_edges: &Buffer2D<bool>) -> Vec<Path> {
 
             // Re-add the center vertex to the path
             path.0.push(path_center);
-
-            println!("Found path with length {}", path.1);
 
             if path.1 + 1 < MIN_PATH_SIZE {
                 continue;
