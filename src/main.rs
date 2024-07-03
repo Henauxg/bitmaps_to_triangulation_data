@@ -12,7 +12,7 @@ use bmp::{
 use serde::Serialize;
 
 // Really quick & dirty
-const DEBUG_OUTPUT: bool = true;
+const DEBUG_OUTPUT: bool = false;
 
 // const FRAME: &str = "./assets/bad_apple_no_lags_000/bad_apple_no_lags_050.bmp";
 // const FRAME: &str = "./assets/bad_apple_no_lags_000/bad_apple_no_lags_170.bmp";
@@ -40,7 +40,7 @@ impl Frame {
 fn main() {
     // TODO Black & white frame: may invert the color to triangulate
     let mut frames = Vec::new();
-    for i in 0..=200 {
+    for i in 0..=299 {
         let frame_bmp_img = bmp::open(format!(
             "./assets/bad_apple_no_lags_000/bad_apple_no_lags_{:03}.bmp",
             i
