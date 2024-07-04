@@ -1,6 +1,7 @@
 use std::{
     fs::File,
     io::{BufWriter, Write},
+    ops::RangeInclusive,
 };
 
 use bmp::{
@@ -11,16 +12,13 @@ use bmp::{
 };
 use serde::Serialize;
 
-// Really quick & dirty
-const DEBUG_OUTPUT: bool = false;
+// Quick & dirty, could be a feature
+pub const DEBUG_OUTPUT: bool = true;
+pub const FRAMES_TO_PROCESS_RANGE: RangeInclusive<usize> = 43..=43;
 
-// const FRAME: &str = "./assets/bad_apple_no_lags_000/bad_apple_no_lags_050.bmp";
-// const FRAME: &str = "./assets/bad_apple_no_lags_000/bad_apple_no_lags_170.bmp";
-// const FRAME: &str = "./assets/bad_apple_no_lags_000/bad_apple_no_lags_180.bmp";
-// const FRAME: &str = "./assets/bad_apple_no_lags_000/bad_apple_no_lags_196.bmp";
-// const FRAME: &str = "./assets/bad_apple_no_lags_000/bad_apple_no_lags_236.bmp";
+pub const COLOR_TO_TRIANGULATE: Pixel = BLACK;
 
-const COLOR_TO_TRIANGULATE: Pixel = BLACK;
+pub const PIXEL_GREYSCALE_BLACK_THRESHOLD: f32 = 0.5;
 pub const MIN_PATH_SIZE: usize = 3;
 
 #[derive(Debug, Serialize)]
@@ -40,12 +38,9 @@ impl Frame {
 fn main() {
     // TODO Black & white frame: may invert the color to triangulate
     let mut frames = Vec::new();
-    for i in 0..=299 {
-        let frame_bmp_img = bmp::open(format!(
-            "./assets/bad_apple_no_lags_000/bad_apple_no_lags_{:03}.bmp",
-            i
-        ))
-        .unwrap();
+    for i in FRAMES_TO_PROCESS_RANGE {
+        println!("{}", format!("./assets/bad_apple_aliasing/{:05}.bmp", i));
+        let frame_bmp_img = bmp::open(format!("./assets/bad_apple_aliasing/{:05}.bmp", i)).unwrap();
         let processed_frame = process_frame(&frame_bmp_img);
         frames.push(processed_frame);
     }
@@ -58,8 +53,13 @@ fn main() {
 }
 
 fn process_frame(img: &bmp::Image) -> Frame {
+    let monochrome_bmp = convert_to_monochrome(img);
+    if DEBUG_OUTPUT {
+        let _ = monochrome_bmp.save("monochrome.bmp");
+    }
+
     // Note 0,0 is the upper left corner of the image
-    let pixels_edges = detect_edges(&img, COLOR_TO_TRIANGULATE);
+    let pixels_edges = detect_edges(&monochrome_bmp, COLOR_TO_TRIANGULATE);
     let output_frame_size = pixels_edges.size;
     if DEBUG_OUTPUT {
         let edges_bmp = create_edges_bitmap(&pixels_edges);
@@ -132,6 +132,23 @@ fn process_frame(img: &bmp::Image) -> Frame {
         }
     }
     frame
+}
+
+fn convert_to_monochrome(img: &bmp::Image) -> bmp::Image {
+    let mut monochrome_bmp = bmp::Image::new(img.get_width() - 2, img.get_height() - 2);
+    // Ignore the borders, some have data in the input images
+    for x in 1..img.get_width() - 1 {
+        for y in 1..img.get_height() - 1 {
+            let color = img.get_pixel(x, y);
+            let greyscale = (color.r as f32 + color.g as f32 + color.b as f32) / (3. * 255.);
+            if greyscale > PIXEL_GREYSCALE_BLACK_THRESHOLD {
+                monochrome_bmp.set_pixel(x - 1, y - 1, BLACK)
+            } else {
+                monochrome_bmp.set_pixel(x - 1, y - 1, WHITE)
+            }
+        }
+    }
+    monochrome_bmp
 }
 
 fn simplify_paths_vertices(domains: &mut Vec<(Path, Buffer2D<bool>)>) {
