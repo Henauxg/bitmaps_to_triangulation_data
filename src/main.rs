@@ -14,10 +14,10 @@ use bmp::{
 use serde::Serialize;
 
 // Quick & dirty, could be a feature
-// pub const DEBUG_OUTPUT: bool = false;
-pub const DEBUG_OUTPUT: bool = true;
-// pub const FRAMES_TO_PROCESS_RANGE: RangeInclusive<usize> = 0..=6472;
-pub const FRAMES_TO_PROCESS_RANGE: RangeInclusive<usize> = 39..=39;
+pub const DEBUG_OUTPUT: bool = false;
+// pub const DEBUG_OUTPUT: bool = true;
+pub const FRAMES_TO_PROCESS_RANGE: RangeInclusive<usize> = 0..=6472;
+// pub const FRAMES_TO_PROCESS_RANGE: RangeInclusive<usize> = 145..=145;
 pub const RENAME_OUTPUT_INDEX_START: usize = 0;
 
 pub const COLOR_TO_TRIANGULATE: Pixel = BLACK;
@@ -83,7 +83,7 @@ fn process_all_bmp_files() {
 fn process_frame(img: &bmp::Image, frame_index: usize) -> Frame {
     let monochrome_bmp = convert_to_monochrome(img);
     if DEBUG_OUTPUT {
-        let _ = monochrome_bmp.save("monochrome.bmp");
+        let _ = monochrome_bmp.save("1_monochrome.bmp");
     }
 
     // Note 0,0 is the upper left corner of the image
@@ -91,27 +91,27 @@ fn process_frame(img: &bmp::Image, frame_index: usize) -> Frame {
     let output_frame_size = pixels_edges.size;
     if DEBUG_OUTPUT {
         let edges_bmp = create_edges_bitmap(&pixels_edges);
-        let _ = edges_bmp.save("edges.bmp");
+        let _ = edges_bmp.save("2_edges.bmp");
     }
 
     let paths = convert_edges_to_paths(&pixels_edges, frame_index);
     if DEBUG_OUTPUT {
         let paths_bmp = create_paths_bitmap(&paths, output_frame_size);
-        let _ = paths_bmp.save("paths.bmp");
+        let _ = paths_bmp.save("3_paths.bmp");
     }
 
     let mut domains = get_domains_from_paths(output_frame_size, paths);
     if DEBUG_OUTPUT {
         let domains_bmp = create_domains_bitmaps(&domains, output_frame_size);
         for (i, domain_bmp) in domains_bmp.iter().enumerate() {
-            let _ = domain_bmp.save(format!("domain_{}.bmp", i));
+            let _ = domain_bmp.save(format!("4_{}_domain.bmp", i));
         }
     }
 
     let kinds = get_domains_kinds(&domains);
     if DEBUG_OUTPUT {
-        let paths_kinds_bmp = create_domains_kinds_bitmap(&domains, &kinds, output_frame_size);
-        let _ = paths_kinds_bmp.save("paths_kinds.bmp");
+        let domains_kinds_bmp = create_domains_kinds_bitmap(&domains, &kinds, output_frame_size);
+        let _ = domains_kinds_bmp.save("5_domains_kinds.bmp");
     }
 
     let orientations = get_domains_paths_orientations(&domains);
@@ -120,14 +120,14 @@ fn process_frame(img: &bmp::Image, frame_index: usize) -> Frame {
     simplify_paths_vertices(&mut domains);
     if DEBUG_OUTPUT {
         let simplified_paths_bmp = create_domains_kinds_bitmap(&domains, &kinds, output_frame_size);
-        let _ = simplified_paths_bmp.save("simplified_paths.bmp");
+        let _ = simplified_paths_bmp.save("6_simplified_paths.bmp");
     }
 
     // Convert path to vertices
     let mut frame = Frame::new();
-    for (((path, _domain), kind), orientation) in domains.iter().zip(kinds).zip(orientations) {
+    for ((domain, kind), orientation) in domains.iter().zip(kinds).zip(orientations) {
         let first_vertex = frame.vertices.len();
-        for v in path.iter() {
+        for v in domain.path.iter() {
             // TODO Re-Center
             // Y bitmap axis is inverted.
             frame.vertices.push((v.0 as i32, -(v.1 as i32)));
@@ -179,9 +179,11 @@ fn convert_to_monochrome(img: &bmp::Image) -> bmp::Image {
     monochrome_bmp
 }
 
-fn simplify_paths_vertices(domains: &mut Vec<(Path, Buffer2D<bool>)>) {
-    for (path, _domain) in domains.iter_mut() {
+fn simplify_paths_vertices(domains: &mut Vec<Domain>) {
+    for domain in domains.iter_mut() {
+        let path = &mut domain.path;
         let mut simplified_path = Path::new();
+
         let mut current_delta = (
             (path[0].0 as i32) - (path[path.len() - 1].0 as i32),
             (path[0].1 as i32) - (path[path.len() - 1].1 as i32),
@@ -254,6 +256,7 @@ impl Size {
     }
 }
 
+#[derive(Clone)]
 struct Buffer2D<T: Copy> {
     pub data: Vec<T>,
     pub size: Size,
@@ -277,11 +280,6 @@ impl<T: Copy> Buffer2D<T> {
     fn is_in_bounds(&self, x: i32, y: i32) -> bool {
         self.size.is_in_bounds(x, y)
     }
-}
-
-fn vertex_dist(v1: VertexCoord, v2: VertexCoord) -> usize {
-    // v1.0.abs_diff(v2.0) + v1.1.abs_diff(v2.1)
-    v1.0.abs_diff(v2.0).max(v1.1.abs_diff(v2.1))
 }
 
 pub type VertexCoord = (usize, usize);
@@ -324,15 +322,30 @@ fn create_edges_bitmap(pixels_edges: &Buffer2D<bool>) -> bmp::Image {
     edges_bmp
 }
 
-fn create_domains_bitmaps(domains: &Vec<(Path, Buffer2D<bool>)>, size: Size) -> Vec<bmp::Image> {
+fn _create_multidomains_bitmap(multidomains: &Buffer2D<Option<(usize, usize)>>) -> bmp::Image {
+    let mut domains_bmp = bmp::Image::new(multidomains.size.w as u32, multidomains.size.h as u32);
+    for x in 0..multidomains.size.w {
+        for y in 0..multidomains.size.h {
+            match multidomains.get(x, y) {
+                Some((id, _)) => {
+                    domains_bmp.set_pixel(x as u32, y as u32, COLORS[id % COLORS.len()])
+                }
+                None => domains_bmp.set_pixel(x as u32, y as u32, BLACK),
+            }
+        }
+    }
+    domains_bmp
+}
+
+fn create_domains_bitmaps(domains: &Vec<Domain>, size: Size) -> Vec<bmp::Image> {
     let mut domains_bmps = Vec::new();
 
     for (index, domain) in domains.iter().enumerate() {
         let mut domain_bmp = bmp::Image::new(size.w as u32, size.h as u32);
         let color = COLORS[index % COLORS.len()];
-        for x in 0..domain.1.size.w {
-            for y in 0..domain.1.size.h {
-                if domain.1.get(x, y) {
+        for x in 0..domain.buffer.size.w {
+            for y in 0..domain.buffer.size.h {
+                if domain.buffer.get(x, y) {
                     domain_bmp.set_pixel(x as u32, y as u32, color);
                 };
             }
@@ -343,18 +356,18 @@ fn create_domains_bitmaps(domains: &Vec<(Path, Buffer2D<bool>)>, size: Size) -> 
 }
 
 fn create_domains_kinds_bitmap(
-    domains: &Vec<(Path, Buffer2D<bool>)>,
+    domains: &Vec<Domain>,
     kinds: &Vec<DomainKind>,
     size: Size,
 ) -> bmp::Image {
     let mut bmp = bmp::Image::new(size.w as u32, size.h as u32);
 
-    for (index, (path, _domain)) in domains.iter().enumerate() {
+    for (index, domain) in domains.iter().enumerate() {
         let color = match kinds[index] {
             DomainKind::Filled => YELLOW,
             DomainKind::Hollow => BLUE_VIOLET,
         };
-        for v in path.iter() {
+        for v in domain.path.iter() {
             bmp.set_pixel(v.0 as u32, v.1 as u32, color);
         }
     }
@@ -391,8 +404,6 @@ struct PixelPos {
 }
 
 const DIRECT_NEIGHBORS: [(i32, i32); 4] = [(-1, 0), (0, 1), (1, 0), (0, -1)];
-
-/// Direct neighbors are listed first for pathfiding to prefer going in straight line rather than oscillating (helps to prevent domains from overlapping)
 const ALL_NEIGHBORS: [(i32, i32); 8] = [
     (1, 0),
     (-1, 0),
@@ -455,11 +466,17 @@ fn detect_edges(img: &bmp::Image, color_to_triangulate: bmp::Pixel) -> Buffer2D<
     edges_buffer
 }
 
+fn euclidean_dist(v1: VertexCoord, v2: VertexCoord) -> usize {
+    v1.0.abs_diff(v2.0).max(v1.1.abs_diff(v2.1))
+}
+
+fn manhattan_dist(v1: VertexCoord, v2: VertexCoord) -> usize {
+    v1.0.abs_diff(v2.0) + v1.1.abs_diff(v2.1)
+}
+
 fn convert_edges_to_paths(pixels_edges: &Buffer2D<bool>, frame_index: usize) -> Vec<Path> {
-    // let mut visited_vertices = Buffer2D::new(false, pixels_edges.size);
     let mut visited_vertices = Buffer2D::new(None, pixels_edges.size);
     let mut all_paths = Vec::new();
-    // let mut valid_paths = Vec::new();
 
     let min_path_len = frame_min_path_length(frame_index);
 
@@ -477,7 +494,6 @@ fn convert_edges_to_paths(pixels_edges: &Buffer2D<bool>, frame_index: usize) -> 
                         }
                     }
                     if visited_vertices.get(x + i, y + j).is_some() {
-                        // if visited_vertices.get(x + i, y + j) {
                         visited = true;
                     }
                 }
@@ -487,7 +503,7 @@ fn convert_edges_to_paths(pixels_edges: &Buffer2D<bool>, frame_index: usize) -> 
             let is_valid_path_shape = pixels_edges.get(x + 1, y + 1)
                 && !visited
                 && side_vertices.len() == 2
-                && vertex_dist(side_vertices[0], side_vertices[1]) > 1;
+                && euclidean_dist(side_vertices[0], side_vertices[1]) > 1;
             if !is_valid_path_shape {
                 continue;
             }
@@ -508,18 +524,19 @@ fn convert_edges_to_paths(pixels_edges: &Buffer2D<bool>, frame_index: usize) -> 
                     for (i, j) in ALL_NEIGHBORS.iter() {
                         let (xi, yj) = (x as i32 + i, y as i32 + j);
                         if pixels_edges.is_in_bounds(xi, yj)
-                            // && !visited_vertices.get(xi as usize, yj as usize)
                             && visited_vertices.get(xi as usize, yj as usize).is_none()
                         {
                             let (xi, yj) = (xi as usize, yj as usize);
                             if pixels_edges.get(xi, yj) && path_center != (xi, yj) {
-                                successors.push(((xi, yj), 1));
+                                // Prefer going straight than going diagonally (helps to prevent domains from overlapping)
+                                let cost = manhattan_dist((x, y), (xi, yj));
+                                successors.push(((xi, yj), cost));
                             }
                         }
                     }
                     successors
                 },
-                |&p| vertex_dist(p, path_end),
+                |&p| manhattan_dist(p, path_end),
                 |&p| p == path_end,
             );
 
@@ -553,13 +570,15 @@ fn convert_edges_to_paths(pixels_edges: &Buffer2D<bool>, frame_index: usize) -> 
                                 if pixels_edges.is_in_bounds(xi, yj) {
                                     let (xi, yj) = (xi as usize, yj as usize);
                                     if pixels_edges.get(xi, yj) && path_center != (xi, yj) {
-                                        successors.push(((xi, yj), 1));
+                                        // Prefer going straight than going diagonally (helps to prevent domains from overlapping)
+                                        let cost = manhattan_dist((x, y), (xi, yj));
+                                        successors.push(((xi, yj), cost));
                                     }
                                 }
                             }
                             successors
                         },
-                        |&p| vertex_dist(p, path_end),
+                        |&p| manhattan_dist(p, path_end),
                         |&p| p == path_end,
                     );
 
@@ -621,7 +640,14 @@ fn convert_edges_to_paths(pixels_edges: &Buffer2D<bool>, frame_index: usize) -> 
         .collect()
 }
 
-fn get_domains_from_paths(frame_size: Size, mut paths: Paths) -> Vec<(Path, Buffer2D<bool>)> {
+#[derive(Clone)]
+pub struct Domain {
+    path: Path,
+    buffer: Buffer2D<bool>,
+    _pixel_count: usize,
+}
+
+fn get_domains_from_paths(frame_size: Size, mut paths: Paths) -> Vec<Domain> {
     let mut domains = Vec::new();
 
     while let Some(path) = paths.pop() {
@@ -657,31 +683,111 @@ fn get_domains_from_paths(frame_size: Size, mut paths: Paths) -> Vec<(Path, Buff
         }
 
         // Invert the domain data to fit inside the path
+        let mut domain_size: usize = 0;
         for v in domain.data.iter_mut() {
             *v = !*v;
+            if *v {
+                domain_size += 1;
+            }
+        }
+        // Mark paths vertices as in the domain again
+        for p in path.iter() {
+            *domain.get_mut(p.0, p.1) = true;
+            domain_size += 1;
         }
 
-        domains.push((path, domain));
+        domains.push(Domain {
+            path,
+            buffer: domain,
+            _pixel_count: domain_size,
+        });
     }
 
+    // TODO Note: We cant filter overlapping domains here, we don't know their kind so they will, of course, overlap.
+    // Filter overlapping domains
+    // It is possible to have some domains that overlap by 1 pixel.
+    // In case of overlap, only keep the largest one
+    // TODO Optim domains bound
+    // let multi_domain_texture = Buffer2D::new(None, frame_size);
+    // let mut valid_domains = vec![true; domains.len()];
+    // for (domain_id, domain) in domains.iter().enumerate() {
+    //     let mut invalidated_domains = HashSet::new();
+    //     for x in 0..domain.buffer.size.w {
+    //         for y in 0..domain.buffer.size.h {
+    //             if domain.buffer.get(x, y) {
+    //                 match multi_domain_texture.get(x, y) {
+    //                     Some((other_id, other_size)) => {
+    //                         if domain.pixel_count > other_size {
+    //                             invalidated_domains.insert(other_id);
+    //                         } else {
+    //                             valid_domains[domain_id] = false;
+    //                             break;
+    //                         }
+    //                     }
+    //                     None => (),
+    //                 }
+    //             }
+    //         }
+    //         if !valid_domains[domain_id] {
+    //             break;
+    //         }
+    //     }
+    //     if valid_domains[domain_id] {
+    //         // Mark pixels occupied by this domain
+    //         for x in 0..domain.buffer.size.w {
+    //             for y in 0..domain.buffer.size.h {
+    //                 if domain.buffer.get(x, y) {
+    //                     *multi_domain_texture.get_mut(x, y) = Some((domain_id, domain.pixel_count));
+    //                 }
+    //             }
+    //         }
+    //         // Invalidate domains and pixels still occupied by those domains
+    //         for invalidated_domain_id in invalidated_domains.iter() {
+    //             valid_domains[*invalidated_domain_id] = false;
+    //             let invalid_domain = &domains[*invalidated_domain_id];
+    //             for x in 0..invalid_domain.buffer.size.w {
+    //                 for y in 0..invalid_domain.buffer.size.h {
+    //                     if invalid_domain.buffer.get(x, y) {
+    //                         if let Some((id, _size)) = multi_domain_texture.get_mut(x, y) {
+    //                             if id == invalidated_domain_id {
+    //                                 *multi_domain_texture.get_mut(x, y) = None;
+    //                             }
+    //                         }
+    //                     }
+    //                 }
+    //             }
+    //         }
+    //     }
+    // }
+
+    // domains
+    //     .iter()
+    //     .enumerate()
+    //     .filter(|(i, _)| valid_domains[*i])
+    //     .map(|(_i, data)| (*data).clone())
+    //     .collect(),
     domains
 }
 
-fn get_domains_kinds(domains: &Vec<(Path, Buffer2D<bool>)>) -> Vec<DomainKind> {
+fn get_domains_kinds(domains: &Vec<Domain>) -> Vec<DomainKind> {
     // Find paths hierarchy (who contains who), then invert orientation for each level
     let mut hierarchies = vec![DomainHierarchy::default(); domains.len()];
-    for (i, (path, domain)) in domains.iter().enumerate() {
-        for (j, (other_path, other_domain)) in domains[i + 1..domains.len()].iter().enumerate() {
+    for (i, domain) in domains.iter().enumerate() {
+        for (j, other_domain) in domains[i + 1..domains.len()].iter().enumerate() {
             let j = j + i + 1;
 
-            if domain.get(other_path[0].0, other_path[0].1)
-                && !other_domain.get(path[0].0, path[0].1)
+            if domain
+                .buffer
+                .get(other_domain.path[0].0, other_domain.path[0].1)
+                && !other_domain.buffer.get(domain.path[0].0, domain.path[0].1)
             {
                 // i C j
                 hierarchies[i].children.push(j);
                 hierarchies[j].parent = Some(i);
-            } else if other_domain.get(path[0].0, path[0].1)
-                && !domain.get(other_path[0].0, other_path[0].1)
+            } else if other_domain.buffer.get(domain.path[0].0, domain.path[0].1)
+                && !domain
+                    .buffer
+                    .get(other_domain.path[0].0, other_domain.path[0].1)
             {
                 // j C i
                 hierarchies[j].children.push(i);
@@ -714,10 +820,11 @@ pub fn set_kinds_with_recursive_hierarchy_walk(
     }
 }
 
-fn get_domains_paths_orientations(domains: &Vec<(Path, Buffer2D<bool>)>) -> Vec<Orientation> {
+fn get_domains_paths_orientations(domains: &Vec<Domain>) -> Vec<Orientation> {
     // Paths orientations are != based on the starting shape+location.. See if it lies to the right or left of the path => gives the path orientation.
     let mut orientations = Vec::with_capacity(domains.len());
-    for (path, domain) in domains.iter() {
+    for domain in domains.iter() {
+        let path = &domain.path;
         let delta_x = (path[1].0 as i32) - (path[0].0 as i32);
         let delta_y = (path[1].1 as i32) - (path[0].1 as i32);
         // Quick & dirty. Might discard left neighbor
@@ -749,12 +856,14 @@ fn get_domains_paths_orientations(domains: &Vec<(Path, Buffer2D<bool>)>) -> Vec<
             )
         };
 
-        let path_vertices_orientation =
-            if domain.get(right_neighbor.0 as usize, right_neighbor.1 as usize) {
-                Orientation::CW
-            } else {
-                Orientation::CCW
-            };
+        let path_vertices_orientation = if domain
+            .buffer
+            .get(right_neighbor.0 as usize, right_neighbor.1 as usize)
+        {
+            Orientation::CW
+        } else {
+            Orientation::CCW
+        };
         orientations.push(path_vertices_orientation);
     }
 
