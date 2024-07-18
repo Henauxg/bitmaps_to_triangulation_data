@@ -1,5 +1,6 @@
 use std::{
-    fs::File,
+    collections::HashSet,
+    fs::{self, File},
     io::{BufWriter, Write},
     ops::RangeInclusive,
 };
@@ -13,13 +14,25 @@ use bmp::{
 use serde::Serialize;
 
 // Quick & dirty, could be a feature
+// pub const DEBUG_OUTPUT: bool = false;
 pub const DEBUG_OUTPUT: bool = true;
-pub const FRAMES_TO_PROCESS_RANGE: RangeInclusive<usize> = 43..=43;
+// pub const FRAMES_TO_PROCESS_RANGE: RangeInclusive<usize> = 0..=6472;
+pub const FRAMES_TO_PROCESS_RANGE: RangeInclusive<usize> = 39..=39;
+pub const RENAME_OUTPUT_INDEX_START: usize = 0;
 
 pub const COLOR_TO_TRIANGULATE: Pixel = BLACK;
 
-pub const PIXEL_GREYSCALE_BLACK_THRESHOLD: f32 = 0.5;
-pub const MIN_PATH_SIZE: usize = 3;
+pub const DEFAULT_PIXEL_GREYSCALE_BLACK_THRESHOLD: f32 = 0.45;
+pub const DEFAULT_MIN_PATH_SIZE: usize = 4;
+
+/// Quick & easy way to tweak some frames where small paths cause issues
+fn frame_min_path_length(frame_index: usize) -> usize {
+    match frame_index {
+        // Sometimes small loops can disable a bigger loop by "stealing" a part of the big loop.
+        // 66 => 8,
+        _ => DEFAULT_MIN_PATH_SIZE,
+    }
+}
 
 #[derive(Debug, Serialize)]
 pub struct Frame {
@@ -36,12 +49,27 @@ impl Frame {
 }
 
 fn main() {
+    process_all_bmp_files();
+    // _rename_some_files();
+}
+
+fn _rename_some_files() {
+    let mut output_index = RENAME_OUTPUT_INDEX_START;
+    for i in FRAMES_TO_PROCESS_RANGE {
+        let from = format!("./assets/input_frames/{:05}.bmp", i);
+        let to = format!("./assets/input_frames/{:05}.bmp", output_index);
+        fs::rename(from, to).unwrap();
+        output_index += 1;
+    }
+}
+
+fn process_all_bmp_files() {
     // TODO Black & white frame: may invert the color to triangulate
     let mut frames = Vec::new();
     for i in FRAMES_TO_PROCESS_RANGE {
-        println!("{}", format!("./assets/bad_apple_aliasing/{:05}.bmp", i));
-        let frame_bmp_img = bmp::open(format!("./assets/bad_apple_aliasing/{:05}.bmp", i)).unwrap();
-        let processed_frame = process_frame(&frame_bmp_img);
+        println!("{}", format!("./assets/input_frames/{:05}.bmp", i));
+        let frame_bmp_img = bmp::open(format!("./assets/input_frames/{:05}.bmp", i)).unwrap();
+        let processed_frame = process_frame(&frame_bmp_img, i);
         frames.push(processed_frame);
     }
 
@@ -52,7 +80,7 @@ fn main() {
     writer.flush().unwrap();
 }
 
-fn process_frame(img: &bmp::Image) -> Frame {
+fn process_frame(img: &bmp::Image, frame_index: usize) -> Frame {
     let monochrome_bmp = convert_to_monochrome(img);
     if DEBUG_OUTPUT {
         let _ = monochrome_bmp.save("monochrome.bmp");
@@ -66,7 +94,7 @@ fn process_frame(img: &bmp::Image) -> Frame {
         let _ = edges_bmp.save("edges.bmp");
     }
 
-    let paths = convert_edges_to_paths(&pixels_edges);
+    let paths = convert_edges_to_paths(&pixels_edges, frame_index);
     if DEBUG_OUTPUT {
         let paths_bmp = create_paths_bitmap(&paths, output_frame_size);
         let _ = paths_bmp.save("paths.bmp");
@@ -136,12 +164,12 @@ fn process_frame(img: &bmp::Image) -> Frame {
 
 fn convert_to_monochrome(img: &bmp::Image) -> bmp::Image {
     let mut monochrome_bmp = bmp::Image::new(img.get_width() - 2, img.get_height() - 2);
-    // Ignore the borders, some have data in the input images
+    // Ignore the borders, some have bad data in the input images
     for x in 1..img.get_width() - 1 {
         for y in 1..img.get_height() - 1 {
             let color = img.get_pixel(x, y);
             let greyscale = (color.r as f32 + color.g as f32 + color.b as f32) / (3. * 255.);
-            if greyscale > PIXEL_GREYSCALE_BLACK_THRESHOLD {
+            if greyscale > DEFAULT_PIXEL_GREYSCALE_BLACK_THRESHOLD {
                 monochrome_bmp.set_pixel(x - 1, y - 1, BLACK)
             } else {
                 monochrome_bmp.set_pixel(x - 1, y - 1, WHITE)
@@ -364,6 +392,18 @@ struct PixelPos {
 
 const DIRECT_NEIGHBORS: [(i32, i32); 4] = [(-1, 0), (0, 1), (1, 0), (0, -1)];
 
+/// Direct neighbors are listed first for pathfiding to prefer going in straight line rather than oscillating (helps to prevent domains from overlapping)
+const ALL_NEIGHBORS: [(i32, i32); 8] = [
+    (1, 0),
+    (-1, 0),
+    (0, -1),
+    (0, 1),
+    (1, 1),
+    (-1, 1),
+    (1, -1),
+    (-1, -1),
+];
+
 fn detect_edges(img: &bmp::Image, color_to_triangulate: bmp::Pixel) -> Buffer2D<bool> {
     let img_size = Size::new(img.get_width() as usize, img.get_height() as usize);
     let mut visited_pixels = Buffer2D::new(false, img_size);
@@ -415,9 +455,13 @@ fn detect_edges(img: &bmp::Image, color_to_triangulate: bmp::Pixel) -> Buffer2D<
     edges_buffer
 }
 
-fn convert_edges_to_paths(pixels_edges: &Buffer2D<bool>) -> Vec<Path> {
-    let mut visited_vertices = Buffer2D::new(false, pixels_edges.size);
-    let mut paths = Vec::new();
+fn convert_edges_to_paths(pixels_edges: &Buffer2D<bool>, frame_index: usize) -> Vec<Path> {
+    // let mut visited_vertices = Buffer2D::new(false, pixels_edges.size);
+    let mut visited_vertices = Buffer2D::new(None, pixels_edges.size);
+    let mut all_paths = Vec::new();
+    // let mut valid_paths = Vec::new();
+
+    let min_path_len = frame_min_path_length(frame_index);
 
     // Iterate the whole image with 3x3 squares
     for x in (0..pixels_edges.size.w - 3).step_by(1) {
@@ -432,7 +476,8 @@ fn convert_edges_to_paths(pixels_edges: &Buffer2D<bool>) -> Vec<Path> {
                             side_vertices.push((x + i, y + j));
                         }
                     }
-                    if visited_vertices.get(x + i, y + j) {
+                    if visited_vertices.get(x + i, y + j).is_some() {
+                        // if visited_vertices.get(x + i, y + j) {
                         visited = true;
                     }
                 }
@@ -456,23 +501,19 @@ fn convert_edges_to_paths(pixels_edges: &Buffer2D<bool>) -> Vec<Path> {
             let path_end = side_vertices[1];
 
             // Pathfind from Start to End, ignoring Center
-            let path = pathfinding::prelude::astar(
+            let mut overriding_path = pathfinding::prelude::astar(
                 &path_start,
                 |&(x, y)| {
                     let mut successors = Vec::new();
-                    for i in -1..=1 {
-                        for j in -1..=1 {
-                            if i == 0 && j == 0 {
-                                continue;
-                            }
-                            let (xi, yj) = (x as i32 + i, y as i32 + j);
-                            if pixels_edges.is_in_bounds(xi, yj)
-                                && !visited_vertices.get(xi as usize, yj as usize)
-                            {
-                                let (xi, yj) = (xi as usize, yj as usize);
-                                if pixels_edges.get(xi, yj) && path_center != (xi, yj) {
-                                    successors.push(((xi, yj), 1));
-                                }
+                    for (i, j) in ALL_NEIGHBORS.iter() {
+                        let (xi, yj) = (x as i32 + i, y as i32 + j);
+                        if pixels_edges.is_in_bounds(xi, yj)
+                            // && !visited_vertices.get(xi as usize, yj as usize)
+                            && visited_vertices.get(xi as usize, yj as usize).is_none()
+                        {
+                            let (xi, yj) = (xi as usize, yj as usize);
+                            if pixels_edges.get(xi, yj) && path_center != (xi, yj) {
+                                successors.push(((xi, yj), 1));
                             }
                         }
                     }
@@ -482,27 +523,102 @@ fn convert_edges_to_paths(pixels_edges: &Buffer2D<bool>) -> Vec<Path> {
                 |&p| p == path_end,
             );
 
-            let Some(mut path) = path else {
-                continue;
-            };
+            match overriding_path {
+                // Path does not overrides any other path, simply register it
+                Some(mut path) => {
+                    // Re-add the center vertex to the path
+                    path.0.push(path_center);
 
-            // Re-add the center vertex to the path
-            path.0.push(path_center);
+                    if path.1 < min_path_len {
+                        continue;
+                    }
 
-            if path.1 + 1 < MIN_PATH_SIZE {
-                continue;
+                    let path_id = all_paths.len();
+                    // Mark pathed vertices as visited
+                    for v in path.0.iter() {
+                        // *visited_vertices.get_mut(v.0, v.1) = true;
+                        *visited_vertices.get_mut(v.0, v.1) = Some((path_id, path.1));
+                    }
+
+                    all_paths.push((path.0, true));
+                }
+                None => {
+                    // Try to find a longer path by using already visited vertices
+                    overriding_path = pathfinding::prelude::astar(
+                        &path_start,
+                        |&(x, y)| {
+                            let mut successors = Vec::new();
+                            for (i, j) in ALL_NEIGHBORS.iter() {
+                                let (xi, yj) = (x as i32 + i, y as i32 + j);
+                                if pixels_edges.is_in_bounds(xi, yj) {
+                                    let (xi, yj) = (xi as usize, yj as usize);
+                                    if pixels_edges.get(xi, yj) && path_center != (xi, yj) {
+                                        successors.push(((xi, yj), 1));
+                                    }
+                                }
+                            }
+                            successors
+                        },
+                        |&p| vertex_dist(p, path_end),
+                        |&p| p == path_end,
+                    );
+
+                    let Some(mut overriding_path) = overriding_path else {
+                        continue;
+                    };
+
+                    // Re-add the center vertex to the path
+                    overriding_path.0.push(path_center);
+
+                    let length = overriding_path.1;
+                    if length < min_path_len {
+                        continue;
+                    }
+
+                    // Check pathed vertices for longer paths
+                    let mut valid = true;
+                    let mut invalidated_paths = HashSet::new();
+                    for v in overriding_path.0.iter() {
+                        if let Some((other_id, other_length)) = visited_vertices.get(v.0, v.1) {
+                            if length <= other_length {
+                                valid = false;
+                                break;
+                            }
+                            invalidated_paths.insert(other_id);
+                        }
+                    }
+
+                    if valid {
+                        // Mark pathed vertices as belonging to this path
+                        let path_id = all_paths.len();
+                        for v in overriding_path.0.iter() {
+                            *visited_vertices.get_mut(v.0, v.1) = Some((path_id, length));
+                        }
+                        all_paths.push((overriding_path.0, true));
+
+                        // Free vertices used by invalidated paths
+                        for invalidated_path in invalidated_paths.iter() {
+                            // Mark as invalid
+                            all_paths[*invalidated_path].1 = false;
+                            for v in all_paths[*invalidated_path].0.iter() {
+                                if let Some((id, _)) = visited_vertices.get(v.0, v.1) {
+                                    if id == *invalidated_path {
+                                        *visited_vertices.get_mut(v.0, v.1) = None;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
-
-            // Mark pathed vertices as visited
-            for v in path.0.iter() {
-                *visited_vertices.get_mut(v.0, v.1) = true;
-            }
-
-            paths.push(path.0);
         }
     }
 
-    paths
+    all_paths
+        .iter()
+        .filter(|(_path, valid)| *valid)
+        .map(|(path, _)| path.clone())
+        .collect()
 }
 
 fn get_domains_from_paths(frame_size: Size, mut paths: Paths) -> Vec<(Path, Buffer2D<bool>)> {
