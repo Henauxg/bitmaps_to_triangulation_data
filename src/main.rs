@@ -11,6 +11,7 @@ use bmp::{
     },
     Pixel,
 };
+use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use serde::Serialize;
 
 #[cfg(feature = "profile_traces")]
@@ -20,12 +21,14 @@ use tracing_subscriber::{layer::SubscriberExt, Registry};
 #[cfg(feature = "profile_traces")]
 use tracing_tracy::TracyLayer;
 
-// Quick & dirty, could be a feature
-pub const DEBUG_OUTPUT: bool = false;
-// pub const DEBUG_OUTPUT: bool = true;
+pub const FRAMES_PATH: &str = "D:/buffer_move_to_backup_disk/bad_apple/high_quality/frames";
+pub const FRAMES_TO_PROCESS_RANGE: RangeInclusive<usize> = 0..=12945;
+
+// pub const FRAMES_PATH: &str = "./assets/input_frames";
 // pub const FRAMES_TO_PROCESS_RANGE: RangeInclusive<usize> = 0..=6472;
-pub const FRAMES_TO_PROCESS_RANGE: RangeInclusive<usize> = 86..=145;
-// pub const FRAMES_TO_PROCESS_RANGE: RangeInclusive<usize> = 145..=145;
+
+// pub const FRAMES_TO_PROCESS_RANGE: RangeInclusive<usize> = 991..=991;
+
 pub const RENAME_OUTPUT_INDEX_START: usize = 0;
 
 pub const COLOR_TO_TRIANGULATE: Pixel = BLACK;
@@ -69,10 +72,14 @@ fn main() {
 fn _rename_some_files() {
     let mut output_index = RENAME_OUTPUT_INDEX_START;
     for i in FRAMES_TO_PROCESS_RANGE {
-        let from = format!("./assets/input_frames/{:05}.bmp", i);
-        let to = format!("./assets/input_frames/{:05}.bmp", output_index);
-        fs::rename(from, to).unwrap();
-        output_index += 1;
+        let from = format!("{}/{:05}.bmp", FRAMES_PATH, i);
+        let to = format!("{}/{:05}.bmp", FRAMES_PATH, output_index);
+        if fs::metadata(from.clone()).is_ok() {
+            fs::rename(from, to).unwrap();
+            output_index += 1;
+        } else {
+            println!("Skipping missing {}", from);
+        }
     }
 }
 
@@ -81,13 +88,15 @@ fn process_all_bmp_files() {
     let _span = span!(Level::TRACE, "process_all_bmp_files").entered();
 
     // TODO Black & white frame: may invert the color to triangulate
-    let mut frames = Vec::new();
-    for i in FRAMES_TO_PROCESS_RANGE {
-        println!("{}", format!("./assets/input_frames_hq/{:05}.bmp", i));
-        let frame_bmp_img = bmp::open(format!("./assets/input_frames_hq/{:05}.bmp", i)).unwrap();
-        let processed_frame = process_frame(&frame_bmp_img, i);
-        frames.push(processed_frame);
-    }
+    let frames: Vec<Frame> = FRAMES_TO_PROCESS_RANGE
+        .into_par_iter()
+        .map(|i| {
+            let frame_path = format!("{}/{:05}.bmp", FRAMES_PATH, i);
+            println!("{}", frame_path);
+            let frame_bmp_img = bmp::open(frame_path).unwrap();
+            process_frame(&frame_bmp_img, i)
+        })
+        .collect();
 
     let file = File::create("bad_apple_frames.msgpack").unwrap();
     let mut writer = BufWriter::new(file);
@@ -101,35 +110,38 @@ fn process_frame(img: &bmp::Image, frame_index: usize) -> Frame {
     let _span = span!(Level::TRACE, "process_frame").entered();
 
     let monochrome_bmp = convert_to_monochrome(img);
-    if DEBUG_OUTPUT {
-        let _ = monochrome_bmp.save("1_monochrome.bmp");
-    }
+    #[cfg(feature = "debug_output")]
+    let _ = monochrome_bmp.save("1_monochrome.bmp");
 
     // Note 0,0 is the upper left corner of the image
     let pixels_edges = detect_edges(&monochrome_bmp, COLOR_TO_TRIANGULATE);
-    let output_frame_size = pixels_edges.size;
-    if DEBUG_OUTPUT {
-        let edges_bmp = create_edges_bitmap(&pixels_edges);
+    let _output_frame_size = pixels_edges.size;
+    #[cfg(feature = "debug_output")]
+    {
+        let edges_bmp = _create_edges_bitmap(&pixels_edges);
         let _ = edges_bmp.save("2_edges.bmp");
     }
 
     let paths = convert_edges_to_paths(&pixels_edges, frame_index);
-    if DEBUG_OUTPUT {
-        let paths_bmp = create_paths_bitmap(&paths, output_frame_size);
+    #[cfg(feature = "debug_output")]
+    {
+        let paths_bmp = _create_paths_bitmap(&paths, _output_frame_size);
         let _ = paths_bmp.save("3_paths.bmp");
     }
 
     let mut domains = get_domains_from_paths(paths);
-    if DEBUG_OUTPUT {
-        let domains_bmp = create_domains_bitmaps(&domains, output_frame_size);
+    #[cfg(feature = "debug_output")]
+    {
+        let domains_bmp = _create_domains_bitmaps(&domains, _output_frame_size);
         for (i, domain_bmp) in domains_bmp.iter().enumerate() {
             let _ = domain_bmp.save(format!("4_{}_domain.bmp", i));
         }
     }
 
     let kinds = get_domains_kinds(&domains);
-    if DEBUG_OUTPUT {
-        let domains_kinds_bmp = create_domains_kinds_bitmap(&domains, &kinds, output_frame_size);
+    #[cfg(feature = "debug_output")]
+    {
+        let domains_kinds_bmp = _create_domains_kinds_bitmap(&domains, &kinds, _output_frame_size);
         let _ = domains_kinds_bmp.save("5_domains_kinds.bmp");
     }
 
@@ -137,8 +149,10 @@ fn process_frame(img: &bmp::Image, frame_index: usize) -> Frame {
 
     // Paths simplification. Remove (some) redondant vertices. Could do more
     simplify_paths_vertices(&mut domains);
-    if DEBUG_OUTPUT {
-        let simplified_paths_bmp = create_domains_kinds_bitmap(&domains, &kinds, output_frame_size);
+    #[cfg(feature = "debug_output")]
+    {
+        let simplified_paths_bmp =
+            _create_domains_kinds_bitmap(&domains, &kinds, _output_frame_size);
         let _ = simplified_paths_bmp.save("6_simplified_paths.bmp");
     }
 
@@ -335,7 +349,7 @@ pub const COLORS: &'static [Pixel] = &[
     BROWN,
 ];
 
-fn create_paths_bitmap(paths: &Paths, size: Size) -> bmp::Image {
+fn _create_paths_bitmap(paths: &Paths, size: Size) -> bmp::Image {
     let mut paths_bmp = bmp::Image::new(size.w as u32, size.h as u32);
 
     for (index, path) in paths.iter().enumerate() {
@@ -347,7 +361,7 @@ fn create_paths_bitmap(paths: &Paths, size: Size) -> bmp::Image {
     paths_bmp
 }
 
-fn create_edges_bitmap(pixels_edges: &Buffer2D<bool>) -> bmp::Image {
+fn _create_edges_bitmap(pixels_edges: &Buffer2D<bool>) -> bmp::Image {
     let mut edges_bmp = bmp::Image::new(pixels_edges.size.w as u32, pixels_edges.size.h as u32);
     for x in 0..pixels_edges.size.w {
         for y in 0..pixels_edges.size.h {
@@ -373,7 +387,7 @@ fn _create_multidomains_bitmap(multidomains: &Buffer2D<Option<(usize, usize)>>) 
     domains_bmp
 }
 
-fn create_domains_bitmaps(domains: &Vec<Domain>, size: Size) -> Vec<bmp::Image> {
+fn _create_domains_bitmaps(domains: &Vec<Domain>, size: Size) -> Vec<bmp::Image> {
     let mut domains_bmps = Vec::new();
 
     for (index, domain) in domains.iter().enumerate() {
@@ -391,7 +405,7 @@ fn create_domains_bitmaps(domains: &Vec<Domain>, size: Size) -> Vec<bmp::Image> 
     domains_bmps
 }
 
-fn create_domains_kinds_bitmap(
+fn _create_domains_kinds_bitmap(
     domains: &Vec<Domain>,
     kinds: &Vec<DomainKind>,
     size: Size,
@@ -583,7 +597,6 @@ fn convert_edges_to_paths(edges: &Buffer2D<bool>, frame_index: usize) -> Vec<Pat
             // Find valid path-like shapes
             let mut invalid = false;
             let mut side_vertices = Vec::new();
-
             for &(i, j) in POSSIBLE_PATHS_PIXELS.iter() {
                 if edges.get(x + i, y + j) {
                     side_vertices.push((x + i, y + j));
