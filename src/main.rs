@@ -198,8 +198,10 @@ fn convert_to_monochrome(img: &bmp::Image) -> bmp::Image {
 
     let mut monochrome_bmp = bmp::Image::new(img.get_width() - 2, img.get_height() - 2);
     // Ignore the borders, some have bad data in the input images
-    for x in 1..img.get_width() - 1 {
-        for y in 1..img.get_height() - 1 {
+
+    // Y first for cache efficiency
+    for y in 1..img.get_height() - 1 {
+        for x in 1..img.get_width() - 1 {
             let color = img.get_pixel(x, y);
             let greyscale = (color.r as f32 + color.g as f32 + color.b as f32) / (3. * 255.);
             if greyscale > DEFAULT_PIXEL_GREYSCALE_BLACK_THRESHOLD {
@@ -550,39 +552,55 @@ pub struct Path {
 
 pub type Paths = Vec<Path>;
 
-fn convert_edges_to_paths(pixels_edges: &Buffer2D<bool>, frame_index: usize) -> Vec<Path> {
+fn convert_edges_to_paths(edges: &Buffer2D<bool>, frame_index: usize) -> Vec<Path> {
     #[cfg(feature = "profile_traces")]
     let _span = span!(Level::TRACE, "convert_edges_to_paths").entered();
 
-    let mut visited_vertices = Buffer2D::new(None, pixels_edges.size);
+    let mut pathed_vertices = Buffer2D::new(None, edges.size);
     let mut all_paths = Vec::new();
 
     let min_path_len = frame_min_path_length(frame_index);
 
+    const POSSIBLE_PATHS_PIXELS: [(usize, usize); 8] = [
+        (0, 0),
+        (0, 1),
+        (0, 2),
+        (1, 0),
+        (1, 2),
+        (2, 0),
+        (2, 1),
+        (2, 2),
+    ];
+
     // Iterate the whole image with 3x3 squares
-    for x in (0..pixels_edges.size.w - 3).step_by(1) {
-        for y in (0..pixels_edges.size.h - 3).step_by(1) {
+    // STEP BY => may miss "some" paths for more performances
+    for x in (0..edges.size.w - 3).step_by(2) {
+        for y in (0..edges.size.h - 3).step_by(2) {
+            // Center is an edge, not visited,
+            if !edges.get(x + 1, y + 1) || pathed_vertices.get(x + 1, y + 1).is_some() {
+                continue;
+            }
             // Find valid path-like shapes
-            let mut visited = false;
+            let mut invalid = false;
             let mut side_vertices = Vec::new();
-            for i in 0..3 {
-                for j in 0..3 {
-                    if pixels_edges.get(x + i, y + j) {
-                        if i != 1 || j != 1 {
-                            side_vertices.push((x + i, y + j));
-                        }
-                    }
-                    if visited_vertices.get(x + i, y + j).is_some() {
-                        visited = true;
-                    }
+
+            for &(i, j) in POSSIBLE_PATHS_PIXELS.iter() {
+                if edges.get(x + i, y + j) {
+                    side_vertices.push((x + i, y + j));
+                }
+                if pathed_vertices.get(x + i, y + j).is_some() {
+                    // TODO Optim May advance cursor by 1 2 or 3
+                    invalid = true;
+                    break;
                 }
             }
+            if invalid {
+                continue;
+            }
 
-            // Center is a vertex, not visited, there are exactly 2 sides vertices, and the dist between the two side vertices is > 1
-            let is_valid_path_shape = pixels_edges.get(x + 1, y + 1)
-                && !visited
-                && side_vertices.len() == 2
-                && euclidean_dist(side_vertices[0], side_vertices[1]) > 1;
+            // There are exactly 2 sides vertices, and the dist between the two side vertices is > 1
+            let is_valid_path_shape =
+                side_vertices.len() == 2 && euclidean_dist(side_vertices[0], side_vertices[1]) > 1;
             if !is_valid_path_shape {
                 continue;
             }
@@ -602,11 +620,11 @@ fn convert_edges_to_paths(pixels_edges: &Buffer2D<bool>, frame_index: usize) -> 
                     let mut successors = Vec::new();
                     for (i, j) in ALL_NEIGHBORS.iter() {
                         let (xi, yj) = (x as i32 + i, y as i32 + j);
-                        if pixels_edges.is_valid(xi, yj)
-                            && visited_vertices.get(xi as usize, yj as usize).is_none()
+                        if edges.is_valid(xi, yj)
+                            && pathed_vertices.get(xi as usize, yj as usize).is_none()
                         {
                             let (xi, yj) = (xi as usize, yj as usize);
-                            if pixels_edges.get(xi, yj) && path_center != (xi, yj) {
+                            if edges.get(xi, yj) && path_center != (xi, yj) {
                                 // Prefer going straight than going diagonally (helps to prevent domains from overlapping)
                                 let cost = manhattan_dist((x, y), (xi, yj));
                                 successors.push(((xi, yj), cost));
@@ -633,7 +651,7 @@ fn convert_edges_to_paths(pixels_edges: &Buffer2D<bool>, frame_index: usize) -> 
                     // Mark pathed vertices as visited
                     let mut bounds = Bounds::new();
                     for v in raw_path.0.iter() {
-                        *visited_vertices.get_mut(v.0, v.1) = Some((path_id, raw_path.1));
+                        *pathed_vertices.get_mut(v.0, v.1) = Some((path_id, raw_path.1));
                         if v.0 > bounds.x_max {
                             bounds.x_max = v.0;
                         }
@@ -664,9 +682,9 @@ fn convert_edges_to_paths(pixels_edges: &Buffer2D<bool>, frame_index: usize) -> 
                             let mut successors = Vec::new();
                             for (i, j) in ALL_NEIGHBORS.iter() {
                                 let (xi, yj) = (x as i32 + i, y as i32 + j);
-                                if pixels_edges.is_valid(xi, yj) {
+                                if edges.is_valid(xi, yj) {
                                     let (xi, yj) = (xi as usize, yj as usize);
-                                    if pixels_edges.get(xi, yj) && path_center != (xi, yj) {
+                                    if edges.get(xi, yj) && path_center != (xi, yj) {
                                         // Prefer going straight than going diagonally (helps to prevent domains from overlapping)
                                         let cost = manhattan_dist((x, y), (xi, yj));
                                         successors.push(((xi, yj), cost));
@@ -695,7 +713,7 @@ fn convert_edges_to_paths(pixels_edges: &Buffer2D<bool>, frame_index: usize) -> 
                     let mut valid = true;
                     let mut invalidated_paths = HashSet::new();
                     for v in overriding_path.0.iter() {
-                        if let Some((other_id, other_length)) = visited_vertices.get(v.0, v.1) {
+                        if let Some((other_id, other_length)) = pathed_vertices.get(v.0, v.1) {
                             if length <= other_length {
                                 valid = false;
                                 break;
@@ -709,7 +727,7 @@ fn convert_edges_to_paths(pixels_edges: &Buffer2D<bool>, frame_index: usize) -> 
                         let path_id = all_paths.len();
                         let mut bounds = Bounds::new();
                         for v in overriding_path.0.iter() {
-                            *visited_vertices.get_mut(v.0, v.1) = Some((path_id, length));
+                            *pathed_vertices.get_mut(v.0, v.1) = Some((path_id, length));
                             if v.0 > bounds.x_max {
                                 bounds.x_max = v.0;
                             }
@@ -736,9 +754,9 @@ fn convert_edges_to_paths(pixels_edges: &Buffer2D<bool>, frame_index: usize) -> 
                             // Mark as invalid
                             all_paths[*invalidated_path].1 = false;
                             for v in all_paths[*invalidated_path].0.pos.iter() {
-                                if let Some((id, _)) = visited_vertices.get(v.0, v.1) {
+                                if let Some((id, _)) = pathed_vertices.get(v.0, v.1) {
                                     if id == *invalidated_path {
-                                        *visited_vertices.get_mut(v.0, v.1) = None;
+                                        *pathed_vertices.get_mut(v.0, v.1) = None;
                                     }
                                 }
                             }
