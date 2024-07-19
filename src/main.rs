@@ -13,10 +13,18 @@ use bmp::{
 };
 use serde::Serialize;
 
+#[cfg(feature = "profile_traces")]
+use tracing::{span, Level};
+#[cfg(feature = "profile_traces")]
+use tracing_subscriber::{layer::SubscriberExt, Registry};
+#[cfg(feature = "profile_traces")]
+use tracing_tracy::TracyLayer;
+
 // Quick & dirty, could be a feature
 pub const DEBUG_OUTPUT: bool = false;
 // pub const DEBUG_OUTPUT: bool = true;
-pub const FRAMES_TO_PROCESS_RANGE: RangeInclusive<usize> = 0..=6472;
+// pub const FRAMES_TO_PROCESS_RANGE: RangeInclusive<usize> = 0..=6472;
+pub const FRAMES_TO_PROCESS_RANGE: RangeInclusive<usize> = 86..=145;
 // pub const FRAMES_TO_PROCESS_RANGE: RangeInclusive<usize> = 145..=145;
 pub const RENAME_OUTPUT_INDEX_START: usize = 0;
 
@@ -49,6 +57,11 @@ impl Frame {
 }
 
 fn main() {
+    #[cfg(feature = "profile_traces")]
+    {
+        let subscriber = Registry::default().with(TracyLayer::default());
+        tracing::subscriber::set_global_default(subscriber).expect("Failed to set subscriber");
+    }
     process_all_bmp_files();
     // _rename_some_files();
 }
@@ -64,11 +77,14 @@ fn _rename_some_files() {
 }
 
 fn process_all_bmp_files() {
+    #[cfg(feature = "profile_traces")]
+    let _span = span!(Level::TRACE, "process_all_bmp_files").entered();
+
     // TODO Black & white frame: may invert the color to triangulate
     let mut frames = Vec::new();
     for i in FRAMES_TO_PROCESS_RANGE {
-        println!("{}", format!("./assets/input_frames/{:05}.bmp", i));
-        let frame_bmp_img = bmp::open(format!("./assets/input_frames/{:05}.bmp", i)).unwrap();
+        println!("{}", format!("./assets/input_frames_hq/{:05}.bmp", i));
+        let frame_bmp_img = bmp::open(format!("./assets/input_frames_hq/{:05}.bmp", i)).unwrap();
         let processed_frame = process_frame(&frame_bmp_img, i);
         frames.push(processed_frame);
     }
@@ -81,6 +97,9 @@ fn process_all_bmp_files() {
 }
 
 fn process_frame(img: &bmp::Image, frame_index: usize) -> Frame {
+    #[cfg(feature = "profile_traces")]
+    let _span = span!(Level::TRACE, "process_frame").entered();
+
     let monochrome_bmp = convert_to_monochrome(img);
     if DEBUG_OUTPUT {
         let _ = monochrome_bmp.save("1_monochrome.bmp");
@@ -100,7 +119,7 @@ fn process_frame(img: &bmp::Image, frame_index: usize) -> Frame {
         let _ = paths_bmp.save("3_paths.bmp");
     }
 
-    let mut domains = get_domains_from_paths(output_frame_size, paths);
+    let mut domains = get_domains_from_paths(paths);
     if DEBUG_OUTPUT {
         let domains_bmp = create_domains_bitmaps(&domains, output_frame_size);
         for (i, domain_bmp) in domains_bmp.iter().enumerate() {
@@ -123,11 +142,22 @@ fn process_frame(img: &bmp::Image, frame_index: usize) -> Frame {
         let _ = simplified_paths_bmp.save("6_simplified_paths.bmp");
     }
 
-    // Convert path to vertices
+    convert_domains_to_frame(&domains, &kinds, &orientations)
+}
+
+fn convert_domains_to_frame(
+    domains: &Vec<Domain>,
+    kinds: &Vec<DomainKind>,
+    orientations: &Vec<Orientation>,
+) -> Frame {
+    #[cfg(feature = "profile_traces")]
+    let _span = span!(Level::TRACE, "convert_domains_to_frame").entered();
+
     let mut frame = Frame::new();
+    // Convert path to vertices
     for ((domain, kind), orientation) in domains.iter().zip(kinds).zip(orientations) {
         let first_vertex = frame.vertices.len();
-        for v in domain.path.iter() {
+        for v in domain.path.pos.iter() {
             // TODO Re-Center
             // Y bitmap axis is inverted.
             frame.vertices.push((v.0 as i32, -(v.1 as i32)));
@@ -163,6 +193,9 @@ fn process_frame(img: &bmp::Image, frame_index: usize) -> Frame {
 }
 
 fn convert_to_monochrome(img: &bmp::Image) -> bmp::Image {
+    #[cfg(feature = "profile_traces")]
+    let _span = span!(Level::TRACE, "convert_to_monochrome").entered();
+
     let mut monochrome_bmp = bmp::Image::new(img.get_width() - 2, img.get_height() - 2);
     // Ignore the borders, some have bad data in the input images
     for x in 1..img.get_width() - 1 {
@@ -180,27 +213,30 @@ fn convert_to_monochrome(img: &bmp::Image) -> bmp::Image {
 }
 
 fn simplify_paths_vertices(domains: &mut Vec<Domain>) {
+    #[cfg(feature = "profile_traces")]
+    let _span = span!(Level::TRACE, "simplify_paths_vertices").entered();
+
     for domain in domains.iter_mut() {
-        let path = &mut domain.path;
-        let mut simplified_path = Path::new();
+        let raw_path = &mut domain.path.pos;
+        let mut simplified_path = RawPath::new();
 
         let mut current_delta = (
-            (path[0].0 as i32) - (path[path.len() - 1].0 as i32),
-            (path[0].1 as i32) - (path[path.len() - 1].1 as i32),
+            (raw_path[0].0 as i32) - (raw_path[raw_path.len() - 1].0 as i32),
+            (raw_path[0].1 as i32) - (raw_path[raw_path.len() - 1].1 as i32),
         );
-        for i in 1..path.len() {
+        for i in 1..raw_path.len() {
             let delta = (
-                (path[i].0 as i32) - (path[i - 1].0 as i32),
-                (path[i].1 as i32) - (path[i - 1].1 as i32),
+                (raw_path[i].0 as i32) - (raw_path[i - 1].0 as i32),
+                (raw_path[i].1 as i32) - (raw_path[i - 1].1 as i32),
             );
             if delta != current_delta {
-                simplified_path.push(path[i - 1]);
+                simplified_path.push(raw_path[i - 1]);
             }
             current_delta = delta;
         }
         // Quick & dirty: simply force the end point to be in
-        simplified_path.push(path[path.len() - 1]);
-        *path = simplified_path;
+        simplified_path.push(raw_path[raw_path.len() - 1]);
+        *raw_path = simplified_path;
     }
 }
 
@@ -251,7 +287,7 @@ impl Size {
         Self { w, h }
     }
 
-    fn is_in_bounds(&self, x: i32, y: i32) -> bool {
+    fn is_valid(&self, x: i32, y: i32) -> bool {
         x >= 0 && y >= 0 && (x as usize) < self.w && (y as usize) < self.h
     }
 }
@@ -277,14 +313,12 @@ impl<T: Copy> Buffer2D<T> {
         &mut self.data[y * self.size.w + x]
     }
 
-    fn is_in_bounds(&self, x: i32, y: i32) -> bool {
-        self.size.is_in_bounds(x, y)
+    fn is_valid(&self, x: i32, y: i32) -> bool {
+        self.size.is_valid(x, y)
     }
 }
 
 pub type VertexCoord = (usize, usize);
-pub type Path = Vec<VertexCoord>;
-pub type Paths = Vec<Path>;
 
 pub const COLORS: &'static [Pixel] = &[
     RED,
@@ -304,7 +338,7 @@ fn create_paths_bitmap(paths: &Paths, size: Size) -> bmp::Image {
 
     for (index, path) in paths.iter().enumerate() {
         let color = COLORS[index % COLORS.len()];
-        for v in path.iter() {
+        for v in path.pos.iter() {
             paths_bmp.set_pixel(v.0 as u32, v.1 as u32, color);
         }
     }
@@ -343,9 +377,9 @@ fn create_domains_bitmaps(domains: &Vec<Domain>, size: Size) -> Vec<bmp::Image> 
     for (index, domain) in domains.iter().enumerate() {
         let mut domain_bmp = bmp::Image::new(size.w as u32, size.h as u32);
         let color = COLORS[index % COLORS.len()];
-        for x in 0..domain.buffer.size.w {
-            for y in 0..domain.buffer.size.h {
-                if domain.buffer.get(x, y) {
+        for x in 0..size.w {
+            for y in 0..size.h {
+                if domain.get_global(x, y) {
                     domain_bmp.set_pixel(x as u32, y as u32, color);
                 };
             }
@@ -367,7 +401,7 @@ fn create_domains_kinds_bitmap(
             DomainKind::Filled => YELLOW,
             DomainKind::Hollow => BLUE_VIOLET,
         };
-        for v in domain.path.iter() {
+        for v in domain.path.pos.iter() {
             bmp.set_pixel(v.0 as u32, v.1 as u32, color);
         }
     }
@@ -378,10 +412,13 @@ fn search_unvisited_domain_pixel(
     visited_pixels: &Buffer2D<bool>,
     img: &bmp::Image,
     color_to_triangulate: bmp::Pixel,
+    from_x: u32,
 ) -> Option<(u32, u32)> {
-    let mut non_visited_domain_pixel = None;
-    // We can safely borders of the image if we want here. Should not have any influence, just helps to avoid malformed images.
-    for x in 1..img.get_width() - 1 {
+    #[cfg(feature = "profile_traces")]
+    let _span = span!(Level::TRACE, "search_unvisited_domain_pixel").entered();
+
+    // We can safely ignore borders of the image if we want here. Should not have any influence, just helps to avoid malformed images.
+    for x in from_x..img.get_width() - 1 {
         for y in 1..img.get_height() - 1 {
             if visited_pixels.get(x as usize, y as usize) {
                 continue;
@@ -390,17 +427,21 @@ fn search_unvisited_domain_pixel(
             if color != color_to_triangulate {
                 continue;
             }
-            non_visited_domain_pixel = Some((x, y));
-            break;
+            return Some((x, y));
         }
     }
-    non_visited_domain_pixel
+    None
 }
 
 // For a pixel, x and y belong to [0..width-1] of the original bmp image
 struct PixelPos {
     x: u32,
     y: u32,
+}
+impl PixelPos {
+    pub fn new(x: u32, y: u32) -> Self {
+        Self { x, y }
+    }
 }
 
 const DIRECT_NEIGHBORS: [(i32, i32); 4] = [(-1, 0), (0, 1), (1, 0), (0, -1)];
@@ -416,6 +457,9 @@ const ALL_NEIGHBORS: [(i32, i32); 8] = [
 ];
 
 fn detect_edges(img: &bmp::Image, color_to_triangulate: bmp::Pixel) -> Buffer2D<bool> {
+    #[cfg(feature = "profile_traces")]
+    let _span = span!(Level::TRACE, "detect_edges").entered();
+
     let img_size = Size::new(img.get_width() as usize, img.get_height() as usize);
     let mut visited_pixels = Buffer2D::new(false, img_size);
 
@@ -424,11 +468,15 @@ fn detect_edges(img: &bmp::Image, color_to_triangulate: bmp::Pixel) -> Buffer2D<
     let mut edges_buffer = Buffer2D::new(false, buffer_size);
 
     // Search non visited pixel of the color to triangulate
+    let mut flood_fill_stack = Vec::new();
+    // Remember where we were in the search, as a quick optimization
+    let mut from_x = 1;
     while let Some(unvisited_domain_pixel) =
-        search_unvisited_domain_pixel(&visited_pixels, &img, color_to_triangulate)
+        search_unvisited_domain_pixel(&visited_pixels, &img, color_to_triangulate, from_x)
     {
+        // Update search base index
+        from_x = unvisited_domain_pixel.0;
         // Initialize the stack
-        let mut flood_fill_stack = Vec::new();
         flood_fill_stack.push(PixelPos {
             x: unvisited_domain_pixel.0,
             y: unvisited_domain_pixel.1,
@@ -440,7 +488,7 @@ fn detect_edges(img: &bmp::Image, color_to_triangulate: bmp::Pixel) -> Buffer2D<
 
             for delta in DIRECT_NEIGHBORS.iter() {
                 let (x, y) = (pixel.x as i32 + delta.0, pixel.y as i32 + delta.1);
-                if !img_size.is_in_bounds(x, y) {
+                if !img_size.is_valid(x, y) {
                     // Outside of the image, register as an edge vertex
                     // Use pixel as the position, to leave void borders in edges_buffer
                     *edges_buffer.get_mut((pixel.x + 1) as usize, (pixel.y + 1) as usize) = true;
@@ -474,7 +522,38 @@ fn manhattan_dist(v1: VertexCoord, v2: VertexCoord) -> usize {
     v1.0.abs_diff(v2.0) + v1.1.abs_diff(v2.1)
 }
 
+#[derive(Clone, Debug)]
+pub struct Bounds {
+    x_min: usize,
+    x_max: usize,
+    y_min: usize,
+    y_max: usize,
+}
+impl Bounds {
+    fn new() -> Self {
+        Self {
+            x_min: usize::MAX,
+            x_max: 0,
+            y_min: usize::MAX,
+            y_max: 0,
+        }
+    }
+}
+
+pub type RawPath = Vec<VertexCoord>;
+
+#[derive(Clone, Debug)]
+pub struct Path {
+    pos: RawPath,
+    bounds: Bounds,
+}
+
+pub type Paths = Vec<Path>;
+
 fn convert_edges_to_paths(pixels_edges: &Buffer2D<bool>, frame_index: usize) -> Vec<Path> {
+    #[cfg(feature = "profile_traces")]
+    let _span = span!(Level::TRACE, "convert_edges_to_paths").entered();
+
     let mut visited_vertices = Buffer2D::new(None, pixels_edges.size);
     let mut all_paths = Vec::new();
 
@@ -523,7 +602,7 @@ fn convert_edges_to_paths(pixels_edges: &Buffer2D<bool>, frame_index: usize) -> 
                     let mut successors = Vec::new();
                     for (i, j) in ALL_NEIGHBORS.iter() {
                         let (xi, yj) = (x as i32 + i, y as i32 + j);
-                        if pixels_edges.is_in_bounds(xi, yj)
+                        if pixels_edges.is_valid(xi, yj)
                             && visited_vertices.get(xi as usize, yj as usize).is_none()
                         {
                             let (xi, yj) = (xi as usize, yj as usize);
@@ -542,22 +621,40 @@ fn convert_edges_to_paths(pixels_edges: &Buffer2D<bool>, frame_index: usize) -> 
 
             match overriding_path {
                 // Path does not overrides any other path, simply register it
-                Some(mut path) => {
+                Some(mut raw_path) => {
                     // Re-add the center vertex to the path
-                    path.0.push(path_center);
+                    raw_path.0.push(path_center);
 
-                    if path.1 < min_path_len {
+                    if raw_path.0.len() < min_path_len {
                         continue;
                     }
 
                     let path_id = all_paths.len();
                     // Mark pathed vertices as visited
-                    for v in path.0.iter() {
-                        // *visited_vertices.get_mut(v.0, v.1) = true;
-                        *visited_vertices.get_mut(v.0, v.1) = Some((path_id, path.1));
+                    let mut bounds = Bounds::new();
+                    for v in raw_path.0.iter() {
+                        *visited_vertices.get_mut(v.0, v.1) = Some((path_id, raw_path.1));
+                        if v.0 > bounds.x_max {
+                            bounds.x_max = v.0;
+                        }
+                        if v.0 < bounds.x_min {
+                            bounds.x_min = v.0;
+                        }
+                        if v.1 > bounds.y_max {
+                            bounds.y_max = v.1;
+                        }
+                        if v.1 < bounds.y_min {
+                            bounds.y_min = v.1;
+                        }
                     }
 
-                    all_paths.push((path.0, true));
+                    all_paths.push((
+                        Path {
+                            pos: raw_path.0,
+                            bounds,
+                        },
+                        true,
+                    ));
                 }
                 None => {
                     // Try to find a longer path by using already visited vertices
@@ -567,7 +664,7 @@ fn convert_edges_to_paths(pixels_edges: &Buffer2D<bool>, frame_index: usize) -> 
                             let mut successors = Vec::new();
                             for (i, j) in ALL_NEIGHBORS.iter() {
                                 let (xi, yj) = (x as i32 + i, y as i32 + j);
-                                if pixels_edges.is_in_bounds(xi, yj) {
+                                if pixels_edges.is_valid(xi, yj) {
                                     let (xi, yj) = (xi as usize, yj as usize);
                                     if pixels_edges.get(xi, yj) && path_center != (xi, yj) {
                                         // Prefer going straight than going diagonally (helps to prevent domains from overlapping)
@@ -610,16 +707,35 @@ fn convert_edges_to_paths(pixels_edges: &Buffer2D<bool>, frame_index: usize) -> 
                     if valid {
                         // Mark pathed vertices as belonging to this path
                         let path_id = all_paths.len();
+                        let mut bounds = Bounds::new();
                         for v in overriding_path.0.iter() {
                             *visited_vertices.get_mut(v.0, v.1) = Some((path_id, length));
+                            if v.0 > bounds.x_max {
+                                bounds.x_max = v.0;
+                            }
+                            if v.0 < bounds.x_min {
+                                bounds.x_min = v.0;
+                            }
+                            if v.1 > bounds.y_max {
+                                bounds.y_max = v.1;
+                            }
+                            if v.1 < bounds.y_min {
+                                bounds.y_min = v.1;
+                            }
                         }
-                        all_paths.push((overriding_path.0, true));
+                        all_paths.push((
+                            Path {
+                                pos: overriding_path.0,
+                                bounds,
+                            },
+                            true,
+                        ));
 
                         // Free vertices used by invalidated paths
                         for invalidated_path in invalidated_paths.iter() {
                             // Mark as invalid
                             all_paths[*invalidated_path].1 = false;
-                            for v in all_paths[*invalidated_path].0.iter() {
+                            for v in all_paths[*invalidated_path].0.pos.iter() {
                                 if let Some((id, _)) = visited_vertices.get(v.0, v.1) {
                                     if id == *invalidated_path {
                                         *visited_vertices.get_mut(v.0, v.1) = None;
@@ -636,158 +752,96 @@ fn convert_edges_to_paths(pixels_edges: &Buffer2D<bool>, frame_index: usize) -> 
     all_paths
         .iter()
         .filter(|(_path, valid)| *valid)
-        .map(|(path, _)| path.clone())
+        .map(|(path, _)| (*path).clone())
         .collect()
 }
 
 #[derive(Clone)]
 pub struct Domain {
+    // Path is in global positions
     path: Path,
+    // Local region buffer
     buffer: Buffer2D<bool>,
-    _pixel_count: usize,
+}
+impl Domain {
+    fn get_global(&self, x: usize, y: usize) -> bool {
+        if x <= self.path.bounds.x_min - 1
+            || y <= self.path.bounds.y_min - 1
+            || x >= self.path.bounds.x_max + 1
+            || y >= self.path.bounds.y_max + 1
+        {
+            false
+        } else {
+            self.buffer.get(
+                x - (self.path.bounds.x_min - 1),
+                y - (self.path.bounds.y_min - 1),
+            )
+        }
+    }
 }
 
-fn get_domains_from_paths(frame_size: Size, mut paths: Paths) -> Vec<Domain> {
+fn get_domains_from_paths(mut paths: Paths) -> Vec<Domain> {
+    #[cfg(feature = "profile_traces")]
+    let _span = span!(Level::TRACE, "get_domains_from_paths").entered();
+
     let mut domains = Vec::new();
-
+    let mut flood_fill_stack = Vec::new();
     while let Some(path) = paths.pop() {
-        // Initialize an emtpy domain
-        let mut domain = Buffer2D::new(false, frame_size);
-        // Mark paths vertices as in the domain
-        for p in path.iter() {
-            *domain.get_mut(p.0, p.1) = true;
+        // Initialize a full domain. Add a wrapping border of 1 pixel on each side to make sure we have a border not belonging to the domain (=> size + 2). We can always add this border since it exists on the frame.
+        let domain_buffer_size = Size {
+            w: (path.bounds.x_max - path.bounds.x_min) + 3,
+            h: (path.bounds.y_max - path.bounds.y_min) + 3,
+        };
+        let mut buffer = Buffer2D::new(true, domain_buffer_size);
+        // Mark paths vertices as not in the domain
+        for p in path.pos.iter() {
+            // Convert to local position
+            *buffer.get_mut(p.0 - (path.bounds.x_min - 1), p.1 - (path.bounds.y_min - 1)) = false;
         }
+        let mut domain = Domain { path, buffer };
 
-        // Initialize the stack
-        let mut flood_fill_stack = Vec::new();
+        // Flood fill/erase the domain exterior. Working in domain local coordinates
         flood_fill_stack.push(PixelPos { x: 0, y: 0 });
-
-        // Flood fill the domain exterior
         while let Some(pixel) = flood_fill_stack.pop() {
-            *domain.get_mut(pixel.x as usize, pixel.y as usize) = true;
+            *domain.buffer.get_mut(pixel.x as usize, pixel.y as usize) = false;
 
             for delta in DIRECT_NEIGHBORS.iter() {
                 let (x, y) = (pixel.x as i32 + delta.0, pixel.y as i32 + delta.1);
-                if !domain.is_in_bounds(x, y) {
-                    // Ignore OOB points
+                if !domain.buffer.is_valid(x, y) {
                     continue;
                 }
-                let pos = PixelPos {
-                    x: x as u32,
-                    y: y as u32,
-                };
-                if !domain.get(pos.x as usize, pos.y as usize) {
+                let pos = PixelPos::new(x as u32, y as u32);
+                if domain.buffer.get(pos.x as usize, pos.y as usize) {
                     flood_fill_stack.push(pos);
                 }
             }
         }
 
-        // Invert the domain data to fit inside the path
-        let mut domain_size: usize = 0;
-        for v in domain.data.iter_mut() {
-            *v = !*v;
-            if *v {
-                domain_size += 1;
-            }
-        }
-        // Mark paths vertices as in the domain again
-        for p in path.iter() {
-            *domain.get_mut(p.0, p.1) = true;
-            domain_size += 1;
-        }
-
-        domains.push(Domain {
-            path,
-            buffer: domain,
-            _pixel_count: domain_size,
-        });
+        domains.push(domain);
     }
 
-    // TODO Note: We cant filter overlapping domains here, we don't know their kind so they will, of course, overlap.
-    // Filter overlapping domains
-    // It is possible to have some domains that overlap by 1 pixel.
-    // In case of overlap, only keep the largest one
-    // TODO Optim domains bound
-    // let multi_domain_texture = Buffer2D::new(None, frame_size);
-    // let mut valid_domains = vec![true; domains.len()];
-    // for (domain_id, domain) in domains.iter().enumerate() {
-    //     let mut invalidated_domains = HashSet::new();
-    //     for x in 0..domain.buffer.size.w {
-    //         for y in 0..domain.buffer.size.h {
-    //             if domain.buffer.get(x, y) {
-    //                 match multi_domain_texture.get(x, y) {
-    //                     Some((other_id, other_size)) => {
-    //                         if domain.pixel_count > other_size {
-    //                             invalidated_domains.insert(other_id);
-    //                         } else {
-    //                             valid_domains[domain_id] = false;
-    //                             break;
-    //                         }
-    //                     }
-    //                     None => (),
-    //                 }
-    //             }
-    //         }
-    //         if !valid_domains[domain_id] {
-    //             break;
-    //         }
-    //     }
-    //     if valid_domains[domain_id] {
-    //         // Mark pixels occupied by this domain
-    //         for x in 0..domain.buffer.size.w {
-    //             for y in 0..domain.buffer.size.h {
-    //                 if domain.buffer.get(x, y) {
-    //                     *multi_domain_texture.get_mut(x, y) = Some((domain_id, domain.pixel_count));
-    //                 }
-    //             }
-    //         }
-    //         // Invalidate domains and pixels still occupied by those domains
-    //         for invalidated_domain_id in invalidated_domains.iter() {
-    //             valid_domains[*invalidated_domain_id] = false;
-    //             let invalid_domain = &domains[*invalidated_domain_id];
-    //             for x in 0..invalid_domain.buffer.size.w {
-    //                 for y in 0..invalid_domain.buffer.size.h {
-    //                     if invalid_domain.buffer.get(x, y) {
-    //                         if let Some((id, _size)) = multi_domain_texture.get_mut(x, y) {
-    //                             if id == invalidated_domain_id {
-    //                                 *multi_domain_texture.get_mut(x, y) = None;
-    //                             }
-    //                         }
-    //                     }
-    //                 }
-    //             }
-    //         }
-    //     }
-    // }
-
-    // domains
-    //     .iter()
-    //     .enumerate()
-    //     .filter(|(i, _)| valid_domains[*i])
-    //     .map(|(_i, data)| (*data).clone())
-    //     .collect(),
     domains
 }
 
 fn get_domains_kinds(domains: &Vec<Domain>) -> Vec<DomainKind> {
+    #[cfg(feature = "profile_traces")]
+    let _span = span!(Level::TRACE, "get_domains_kinds").entered();
+
+    // We know that domains are either fully overlapping or disjoint. We just need to check 1 point
+
     // Find paths hierarchy (who contains who), then invert orientation for each level
     let mut hierarchies = vec![DomainHierarchy::default(); domains.len()];
     for (i, domain) in domains.iter().enumerate() {
         for (j, other_domain) in domains[i + 1..domains.len()].iter().enumerate() {
             let j = j + i + 1;
 
-            if domain
-                .buffer
-                .get(other_domain.path[0].0, other_domain.path[0].1)
-                && !other_domain.buffer.get(domain.path[0].0, domain.path[0].1)
-            {
+            let (p_x, p_y) = (domain.path.pos[0].0, domain.path.pos[0].1);
+            let (other_p_x, other_p_y) = (other_domain.path.pos[0].0, other_domain.path.pos[0].1);
+            if domain.get_global(other_p_x, other_p_y) && !other_domain.get_global(p_x, p_y) {
                 // i C j
                 hierarchies[i].children.push(j);
                 hierarchies[j].parent = Some(i);
-            } else if other_domain.buffer.get(domain.path[0].0, domain.path[0].1)
-                && !domain
-                    .buffer
-                    .get(other_domain.path[0].0, other_domain.path[0].1)
+            } else if other_domain.get_global(p_x, p_y) && !domain.get_global(other_p_x, other_p_y)
             {
                 // j C i
                 hierarchies[j].children.push(i);
@@ -821,49 +875,35 @@ pub fn set_kinds_with_recursive_hierarchy_walk(
 }
 
 fn get_domains_paths_orientations(domains: &Vec<Domain>) -> Vec<Orientation> {
+    #[cfg(feature = "profile_traces")]
+    let _span = span!(Level::TRACE, "get_domains_paths_orientations").entered();
+
     // Paths orientations are != based on the starting shape+location.. See if it lies to the right or left of the path => gives the path orientation.
     let mut orientations = Vec::with_capacity(domains.len());
     for domain in domains.iter() {
-        let path = &domain.path;
+        let path = &domain.path.pos;
         let delta_x = (path[1].0 as i32) - (path[0].0 as i32);
         let delta_y = (path[1].1 as i32) - (path[0].1 as i32);
         // Quick & dirty. Might discard left neighbor
-        let (right_neighbor, _left_neigh) = if delta_x == 1 && delta_y == -1 {
-            (
-                (path[0].0 as i32 + 1, path[0].1 as i32),
-                (path[0].0 as i32, path[0].1 as i32 - 1),
-            )
+        let right_neighbor = if delta_x == 1 && delta_y == -1 {
+            (path[0].0 as i32 + 1, path[0].1 as i32)
         } else if delta_x == 1 && delta_y == 1 {
-            (
-                (path[0].0 as i32, path[0].1 as i32 + 1),
-                (path[0].0 as i32 + 1, path[0].1 as i32),
-            )
+            (path[0].0 as i32, path[0].1 as i32 + 1)
         } else if delta_x == -1 && delta_y == -1 {
-            (
-                (path[0].0 as i32, path[0].1 as i32 - 1),
-                (path[0].0 as i32 - 1, path[0].1 as i32),
-            )
+            (path[0].0 as i32, path[0].1 as i32 - 1)
         } else if delta_x == -1 && delta_y == 1 {
-            (
-                (path[0].0 as i32 - 1, path[0].1 as i32),
-                (path[0].0 as i32, path[0].1 as i32 + 1),
-            )
+            (path[0].0 as i32 - 1, path[0].1 as i32)
         } else {
             // delta_x == 0 || delta_y == 0
-            (
-                (path[0].0 as i32 - delta_y, path[0].1 as i32 + delta_x),
-                (path[0].0 as i32 + delta_y, path[0].1 as i32 - delta_x),
-            )
+            (path[0].0 as i32 - delta_y, path[0].1 as i32 + delta_x)
         };
 
-        let path_vertices_orientation = if domain
-            .buffer
-            .get(right_neighbor.0 as usize, right_neighbor.1 as usize)
-        {
-            Orientation::CW
-        } else {
-            Orientation::CCW
-        };
+        let path_vertices_orientation =
+            if domain.get_global(right_neighbor.0 as usize, right_neighbor.1 as usize) {
+                Orientation::CW
+            } else {
+                Orientation::CCW
+            };
         orientations.push(path_vertices_orientation);
     }
 
