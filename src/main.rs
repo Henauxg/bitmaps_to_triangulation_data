@@ -3,6 +3,7 @@ use std::{
     fs::{self, File},
     io::{BufWriter, Write},
     ops::RangeInclusive,
+    time::Instant,
 };
 
 use bmp::{
@@ -11,6 +12,7 @@ use bmp::{
     },
     Pixel,
 };
+use indicatif::ParallelProgressIterator;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use serde::Serialize;
 
@@ -21,18 +23,13 @@ use tracing_subscriber::{layer::SubscriberExt, Registry};
 #[cfg(feature = "profile_traces")]
 use tracing_tracy::TracyLayer;
 
-pub const FRAMES_PATH: &str = "D:/buffer_move_to_backup_disk/bad_apple/high_quality/frames";
-pub const FRAMES_TO_PROCESS_RANGE: RangeInclusive<usize> = 0..=12945;
-
-// pub const FRAMES_PATH: &str = "./assets/input_frames";
-// pub const FRAMES_TO_PROCESS_RANGE: RangeInclusive<usize> = 0..=6472;
-
-// pub const FRAMES_TO_PROCESS_RANGE: RangeInclusive<usize> = 991..=991;
+pub const FRAMES_PATH: &str = "./assets/input_frames";
+pub const FRAMES_TO_PROCESS_RANGE: RangeInclusive<usize> = 0..=500;
+pub const OUTPUT_FILE: &str = "frames.msgpack";
 
 pub const RENAME_OUTPUT_INDEX_START: usize = 0;
 
 pub const COLOR_TO_TRIANGULATE: Pixel = BLACK;
-
 pub const DEFAULT_PIXEL_GREYSCALE_BLACK_THRESHOLD: f32 = 0.45;
 pub const DEFAULT_MIN_PATH_SIZE: usize = 4;
 
@@ -88,17 +85,21 @@ fn process_all_bmp_files() {
     let _span = span!(Level::TRACE, "process_all_bmp_files").entered();
 
     // TODO Black & white frame: may invert the color to triangulate
+    println!("Processing frames...");
+    let now = Instant::now();
     let frames: Vec<Frame> = FRAMES_TO_PROCESS_RANGE
         .into_par_iter()
+        .progress_count((FRAMES_TO_PROCESS_RANGE.end() - FRAMES_TO_PROCESS_RANGE.start()) as u64)
         .map(|i| {
             let frame_path = format!("{}/{:05}.bmp", FRAMES_PATH, i);
-            println!("{}", frame_path);
             let frame_bmp_img = bmp::open(frame_path).unwrap();
             process_frame(&frame_bmp_img, i)
         })
         .collect();
+    println!("Conversion took {:?}s", now.elapsed().as_secs());
 
-    let file = File::create("bad_apple_frames.msgpack").unwrap();
+    println!("Serialiazing...");
+    let file = File::create(OUTPUT_FILE).unwrap();
     let mut writer = BufWriter::new(file);
     let bytes = rmp_serde::to_vec(&frames).unwrap();
     writer.write_all(&bytes).unwrap();
