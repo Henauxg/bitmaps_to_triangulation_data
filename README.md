@@ -38,3 +38,7 @@ For each greyscale bitmap image, it will:
 ### Notes
 
 Although it was only used and tested on some "Bad Apple" videos (https://www.youtube.com/watch?v=FBqz4WzE1sc and https://www.youtube.com/watch?v=FtutLA63Cp8), the tool should still work on any greyscale video, in any resolution.
+
+### License
+
+All code in this repository is licensed under the MIT License ([LICENSE-MIT](LICENSE-MIT) or [http://opensource.org/licenses/MIT](http://opensource.org/licenses/MIT))
