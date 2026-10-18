@@ -32,6 +32,7 @@ pub const RENAME_OUTPUT_INDEX_START: usize = 0;
 pub const COLOR_TO_TRIANGULATE: Pixel = BLACK;
 pub const DEFAULT_PIXEL_GREYSCALE_BLACK_THRESHOLD: f32 = 0.45;
 pub const DEFAULT_MIN_PATH_SIZE: usize = 4;
+pub const DOMAIN_INTERIOR_SAMPLING_STEP: usize = 5;
 
 /// Quick & easy way to tweak some frames where small paths cause issues
 fn frame_min_path_length(frame_index: usize) -> usize {
@@ -202,6 +203,10 @@ fn convert_domains_to_frame(
                     .extend((first_vertex..last_vertex).map(|i| (i, i + 1)));
                 frame.edges.push((last_vertex, first_vertex));
             }
+        }
+        for v in domain.interior_samples.iter() {
+            // Y bitmap axis is inverted.
+            frame.vertices.push((v.0 as i32, -(v.1 as i32)));
         }
     }
     frame
@@ -400,6 +405,10 @@ fn _create_domains_bitmaps(domains: &Vec<Domain>, size: Size) -> Vec<bmp::Image>
                     domain_bmp.set_pixel(x as u32, y as u32, color);
                 };
             }
+        }
+        // Display sampled interior points as white pixels
+        for v in domain.interior_samples.iter() {
+            domain_bmp.set_pixel(v.0 as u32, v.1 as u32, WHITE);
         }
         domains_bmps.push(domain_bmp);
     }
@@ -792,6 +801,8 @@ fn convert_edges_to_paths(edges: &Buffer2D<bool>, frame_index: usize) -> Vec<Pat
 pub struct Domain {
     // Path is in global positions
     path: Path,
+    // Sampled points inside the domain, in global positions
+    interior_samples: Vec<VertexCoord>,
     // Local region buffer
     buffer: Buffer2D<bool>,
 }
@@ -830,26 +841,60 @@ fn get_domains_from_paths(mut paths: Paths) -> Vec<Domain> {
             // Convert to local position
             *buffer.get_mut(p.0 - (path.bounds.x_min - 1), p.1 - (path.bounds.y_min - 1)) = false;
         }
-        let mut domain = Domain { path, buffer };
 
         // Flood fill/erase the domain exterior. Working in domain local coordinates
         flood_fill_stack.push(PixelPos { x: 0, y: 0 });
         while let Some(pixel) = flood_fill_stack.pop() {
-            *domain.buffer.get_mut(pixel.x as usize, pixel.y as usize) = false;
+            *buffer.get_mut(pixel.x as usize, pixel.y as usize) = false;
 
             for delta in DIRECT_NEIGHBORS.iter() {
                 let (x, y) = (pixel.x as i32 + delta.0, pixel.y as i32 + delta.1);
-                if !domain.buffer.is_valid(x, y) {
+                if !buffer.is_valid(x, y) {
                     continue;
                 }
                 let pos = PixelPos::new(x as u32, y as u32);
-                if domain.buffer.get(pos.x as usize, pos.y as usize) {
+                if buffer.get(pos.x as usize, pos.y as usize) {
                     flood_fill_stack.push(pos);
                 }
             }
         }
 
-        domains.push(domain);
+        // Sample interior points
+        let mut interior_samples = Vec::new();
+        for x in (path.bounds.x_min + 1..path.bounds.x_max).step_by(DOMAIN_INTERIOR_SAMPLING_STEP) {
+            for y in
+                (path.bounds.y_min + 1..path.bounds.y_max).step_by(DOMAIN_INTERIOR_SAMPLING_STEP)
+            {
+                // Point and its direct neighbors are inside the domain (using global to local coord conversion)
+                let is_interior = buffer
+                    .get(x - (path.bounds.x_min - 1), y - (path.bounds.y_min - 1))
+                    && buffer.get(
+                        (x - 1) - (path.bounds.x_min - 1),
+                        y - (path.bounds.y_min - 1),
+                    )
+                    && buffer.get(
+                        (x + 1) - (path.bounds.x_min - 1),
+                        y - (path.bounds.y_min - 1),
+                    )
+                    && buffer.get(
+                        x - (path.bounds.x_min - 1),
+                        (y - 1) - (path.bounds.y_min - 1),
+                    )
+                    && buffer.get(
+                        x - (path.bounds.x_min - 1),
+                        (y + 1) - (path.bounds.y_min - 1),
+                    );
+                if is_interior {
+                    interior_samples.push((x, y));
+                }
+            }
+        }
+
+        domains.push(Domain {
+            path,
+            interior_samples,
+            buffer,
+        });
     }
 
     domains
